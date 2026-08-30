@@ -39,6 +39,21 @@ pub enum ParseError {
     BadSide(u8),
 }
 
+impl std::fmt::Display for ParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ParseError::Truncated { kind, need, got } => write!(
+                f,
+                "truncated {} message: need {need} bytes, got {got}",
+                *kind as char
+            ),
+            ParseError::BadSide(b) => write!(f, "invalid side byte {:?}", *b as char),
+        }
+    }
+}
+
+impl std::error::Error for ParseError {}
+
 /// Header fields shared by every ITCH message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Header {
@@ -143,6 +158,70 @@ pub enum Body {
     },
 }
 
+/// Coarse classification of a message, for counting and reporting.
+///
+/// Lives here rather than in the consumer so that adding a [`Body`] variant
+/// forces the classification to be updated in the same place, and so that a
+/// caller can tally messages with an array index instead of a second match
+/// over the same value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(usize)]
+pub enum MessageKind {
+    Add = 0,
+    Executed,
+    Cancel,
+    Delete,
+    Replace,
+    HiddenTrade,
+    Cross,
+    Administrative,
+}
+
+impl MessageKind {
+    pub const COUNT: usize = 8;
+
+    pub const ALL: [MessageKind; Self::COUNT] = [
+        MessageKind::Add,
+        MessageKind::Executed,
+        MessageKind::Cancel,
+        MessageKind::Delete,
+        MessageKind::Replace,
+        MessageKind::HiddenTrade,
+        MessageKind::Cross,
+        MessageKind::Administrative,
+    ];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            MessageKind::Add => "add",
+            MessageKind::Executed => "executed",
+            MessageKind::Cancel => "cancel",
+            MessageKind::Delete => "delete",
+            MessageKind::Replace => "replace",
+            MessageKind::HiddenTrade => "hidden trade",
+            MessageKind::Cross => "cross",
+            MessageKind::Administrative => "administrative",
+        }
+    }
+}
+
+impl Body {
+    pub const fn kind(&self) -> MessageKind {
+        match self {
+            Body::AddOrder { .. } => MessageKind::Add,
+            Body::OrderExecuted { .. } | Body::OrderExecutedWithPrice { .. } => {
+                MessageKind::Executed
+            }
+            Body::OrderCancel { .. } => MessageKind::Cancel,
+            Body::OrderDelete { .. } => MessageKind::Delete,
+            Body::OrderReplace { .. } => MessageKind::Replace,
+            Body::TradeNonCross { .. } => MessageKind::HiddenTrade,
+            Body::CrossTrade { .. } => MessageKind::Cross,
+            _ => MessageKind::Administrative,
+        }
+    }
+}
+
 /// Wire length of each message type, including the type byte.
 ///
 /// Returns `None` for an unrecognised type, which is treated as a hard error
@@ -230,12 +309,20 @@ fn side_at(b: &[u8], o: usize) -> Result<Side, ParseError> {
 /// `buf` must be exactly the message: the reader is responsible for framing.
 pub fn decode(buf: &[u8]) -> Result<(Header, Body), ParseError> {
     if buf.is_empty() {
-        return Err(ParseError::Truncated { kind: 0, need: 1, got: 0 });
+        return Err(ParseError::Truncated {
+            kind: 0,
+            need: 1,
+            got: 0,
+        });
     }
     let kind = buf[0];
     let need = message_len(kind).unwrap_or(0);
     if need == 0 || buf.len() < need {
-        return Err(ParseError::Truncated { kind, need, got: buf.len() });
+        return Err(ParseError::Truncated {
+            kind,
+            need,
+            got: buf.len(),
+        });
     }
 
     let header = Header {
@@ -246,7 +333,9 @@ pub fn decode(buf: &[u8]) -> Result<(Header, Body), ParseError> {
 
     // Every body begins at offset 11, after the shared header.
     let body = match kind {
-        b'S' => Body::SystemEvent { event_code: buf[11] },
+        b'S' => Body::SystemEvent {
+            event_code: buf[11],
+        },
         b'R' => Body::StockDirectory {
             stock: sym_at(buf, 11),
             round_lot_size: u32_at(buf, 21),
@@ -287,7 +376,9 @@ pub fn decode(buf: &[u8]) -> Result<(Header, Body), ParseError> {
             order_ref: u64_at(buf, 11),
             cancelled_shares: u32_at(buf, 19),
         },
-        b'D' => Body::OrderDelete { order_ref: u64_at(buf, 11) },
+        b'D' => Body::OrderDelete {
+            order_ref: u64_at(buf, 11),
+        },
         b'U' => Body::OrderReplace {
             original_order_ref: u64_at(buf, 11),
             new_order_ref: u64_at(buf, 19),
@@ -309,7 +400,9 @@ pub fn decode(buf: &[u8]) -> Result<(Header, Body), ParseError> {
             match_number: u64_at(buf, 31),
             cross_type: buf[39],
         },
-        b'B' => Body::BrokenTrade { match_number: u64_at(buf, 11) },
+        b'B' => Body::BrokenTrade {
+            match_number: u64_at(buf, 11),
+        },
         other => Body::Other { kind: other },
     };
 
@@ -353,7 +446,14 @@ mod tests {
 
         let (_, b) = decode(&m).unwrap();
         match b {
-            Body::AddOrder { order_ref, side, shares, stock, price, attributed } => {
+            Body::AddOrder {
+                order_ref,
+                side,
+                shares,
+                stock,
+                price,
+                attributed,
+            } => {
                 assert_eq!(order_ref, 42);
                 assert_eq!(side, Side::Buy);
                 assert_eq!(shares, 100);
@@ -386,8 +486,22 @@ mod tests {
         let (_, f) = decode(&attributed).unwrap();
         match (a, f) {
             (
-                Body::AddOrder { order_ref: r1, side: s1, shares: q1, stock: k1, price: p1, .. },
-                Body::AddOrder { order_ref: r2, side: s2, shares: q2, stock: k2, price: p2, attributed },
+                Body::AddOrder {
+                    order_ref: r1,
+                    side: s1,
+                    shares: q1,
+                    stock: k1,
+                    price: p1,
+                    ..
+                },
+                Body::AddOrder {
+                    order_ref: r2,
+                    side: s2,
+                    shares: q2,
+                    stock: k2,
+                    price: p2,
+                    attributed,
+                },
             ) => {
                 assert_eq!((r1, s1, q1, k1, p1), (r2, s2, q2, k2, p2));
                 assert!(attributed);
@@ -409,7 +523,11 @@ mod tests {
 
         let (_, b) = decode(&m).unwrap();
         match b {
-            Body::OrderExecutedWithPrice { printable, execution_price, .. } => {
+            Body::OrderExecutedWithPrice {
+                printable,
+                execution_price,
+                ..
+            } => {
                 assert!(!printable);
                 assert_eq!(execution_price, 1_000_000);
             }
@@ -442,7 +560,10 @@ mod tests {
     #[test]
     fn truncated_input_is_an_error_not_a_panic() {
         let m = framed(b'A', &[0u8; 4]);
-        assert!(matches!(decode(&m), Err(ParseError::Truncated { kind: b'A', .. })));
+        assert!(matches!(
+            decode(&m),
+            Err(ParseError::Truncated { kind: b'A', .. })
+        ));
     }
 
     #[test]

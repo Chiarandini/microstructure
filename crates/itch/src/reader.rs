@@ -19,23 +19,38 @@ pub enum ReadError {
     /// This is fatal rather than skippable: the framing and the type byte
     /// disagreeing means the stream position is wrong, so every subsequent
     /// message would be garbage.
-    FramingMismatch { kind: u8, declared: usize, expected: usize },
+    FramingMismatch {
+        kind: u8,
+        declared: usize,
+        expected: usize,
+    },
     /// The type byte is not one this decoder knows.
-    UnknownType { kind: u8, offset: u64 },
+    UnknownType {
+        kind: u8,
+        offset: u64,
+    },
 }
 
 impl std::fmt::Display for ReadError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ReadError::Io(e) => write!(f, "io error: {e}"),
-            ReadError::Parse(e) => write!(f, "parse error: {e:?}"),
-            ReadError::FramingMismatch { kind, declared, expected } => write!(
+            ReadError::Parse(e) => write!(f, "parse error: {e}"),
+            ReadError::FramingMismatch {
+                kind,
+                declared,
+                expected,
+            } => write!(
                 f,
                 "framing mismatch for type {}: length prefix says {declared}, spec says {expected}",
                 *kind as char
             ),
             ReadError::UnknownType { kind, offset } => {
-                write!(f, "unknown message type {:?} (0x{kind:02x}) at byte {offset}", *kind as char)
+                write!(
+                    f,
+                    "unknown message type {:?} (0x{kind:02x}) at byte {offset}",
+                    *kind as char
+                )
             }
         }
     }
@@ -79,9 +94,18 @@ pub fn open(path: impl AsRef<Path>) -> io::Result<Reader<Box<dyn Read>>> {
 
 impl<R: Read> Reader<R> {
     pub fn new(inner: R) -> Self {
+        Self::with_capacity(inner, 1 << 20)
+    }
+
+    /// Construct with an explicit buffer size.
+    ///
+    /// Exists so tests can force the refill and compaction paths with a
+    /// buffer smaller than a single message, rather than reaching into
+    /// private fields to do it.
+    pub fn with_capacity(inner: R, capacity: usize) -> Self {
         Reader {
             inner,
-            buf: vec![0; 1 << 20],
+            buf: vec![0; capacity.max(2)],
             filled: 0,
             pos: 0,
             offset: 0,
@@ -96,7 +120,6 @@ impl<R: Read> Reader<R> {
             if self.eof {
                 return Ok(false);
             }
-            // Compact: move the unconsumed tail to the front.
             if self.pos > 0 {
                 self.buf.copy_within(self.pos..self.filled, 0);
                 self.filled -= self.pos;
@@ -133,10 +156,16 @@ impl<R: Read> Reader<R> {
         let start = self.pos + 2;
         let kind = self.buf[start];
 
-        let expected = message_len(kind)
-            .ok_or(ReadError::UnknownType { kind, offset: self.offset })?;
+        let expected = message_len(kind).ok_or(ReadError::UnknownType {
+            kind,
+            offset: self.offset,
+        })?;
         if expected != len {
-            return Err(ReadError::FramingMismatch { kind, declared: len, expected });
+            return Err(ReadError::FramingMismatch {
+                kind,
+                declared: len,
+                expected,
+            });
         }
 
         let msg = decode(&self.buf[start..start + len]).map_err(ReadError::Parse)?;
@@ -185,8 +214,18 @@ mod tests {
 
         match (b1, b2) {
             (
-                Body::AddOrder { order_ref: 1, side: Side::Buy, shares: 100, .. },
-                Body::AddOrder { order_ref: 2, side: Side::Sell, shares: 200, .. },
+                Body::AddOrder {
+                    order_ref: 1,
+                    side: Side::Buy,
+                    shares: 100,
+                    ..
+                },
+                Body::AddOrder {
+                    order_ref: 2,
+                    side: Side::Sell,
+                    shares: 200,
+                    ..
+                },
             ) => {}
             other => panic!("unexpected: {other:?}"),
         }
@@ -200,10 +239,8 @@ mod tests {
         for i in 0..500u64 {
             stream.extend_from_slice(&frame(&add_order(i, b'B', 100, 1000)));
         }
-        let mut r = Reader::new(&stream[..]);
-        r.buf = vec![0; 8]; // smaller than a single 36-byte message
-        r.filled = 0;
-        r.pos = 0;
+        // Smaller than a single 36-byte message, so every read refills.
+        let mut r = Reader::with_capacity(&stream[..], 8);
 
         let mut seen = 0u64;
         while let Some((_, body)) = r.next_message().unwrap() {
@@ -238,7 +275,11 @@ mod tests {
         let mut r = Reader::new(&bad[..]);
         assert!(matches!(
             r.next_message(),
-            Err(ReadError::FramingMismatch { kind: b'A', declared: 35, expected: 36 })
+            Err(ReadError::FramingMismatch {
+                kind: b'A',
+                declared: 35,
+                expected: 36
+            })
         ));
     }
 
@@ -248,6 +289,9 @@ mod tests {
         msg[0] = b'z';
         let stream = frame(&msg);
         let mut r = Reader::new(&stream[..]);
-        assert!(matches!(r.next_message(), Err(ReadError::UnknownType { kind: b'z', .. })));
+        assert!(matches!(
+            r.next_message(),
+            Err(ReadError::UnknownType { kind: b'z', .. })
+        ));
     }
 }

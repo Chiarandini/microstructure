@@ -38,13 +38,15 @@ messages             282,229,684   28,734,686
   hidden trade         1,461,010      243,778
   cross                   17,700            0
 
-elapsed                  70.14 s       4.82 s
-throughput          4.02 M msg/s  5.96 M msg/s
+elapsed                  50.46 s       3.73 s
+throughput          5.59 M msg/s  7.70 M msg/s
 
 crossed-book checks  141,170,621   12,435,862
 crossed-book fails             0            0
 unknown order refs             0            0
 oversized removals             0            0
+duplicate order ids            0            0
+level inconsistent             0            0
 orders still live              0            0
 depth vs order map    consistent   consistent
 ```
@@ -80,35 +82,41 @@ Two reconstruction traps that these checks exist to catch, both handled:
 
 ## Throughput
 
-4 M messages/second single-threaded on the full Nasdaq feed, including gzip
+5.6 M messages/second single-threaded on the full Nasdaq feed, including gzip
 decompression and maintaining 8,849 live books. A whole trading day replays in
-70 seconds, which is the property that matters: re-running the entire study
+50 seconds, which is the property that matters: re-running the entire study
 after a bug fix is a coffee-length operation rather than an overnight job.
 
 The decoder borrows from the read buffer and allocates nothing per message.
 Prices stay as integer ticks of $0.0001 end to end; converting to floating
 point happens once, in the analysis layer.
 
+Routing is a direct index by the header's `stock_locate`. Every ITCH message
+carries one, including the order messages that identify their order only by
+id, so no order-id to book map is needed and no hashing happens per message.
+
+Decompression is about a quarter of wall time (`gunzip` alone on the BX
+session is 0.98 s against a 3.73 s replay), so a faster inflate backend is
+worth perhaps 15%. Not currently a priority.
+
 ## Failing loudly
 
-The reader treats an unknown message type or a length prefix disagreeing with
-the specification as fatal. Both mean the stream position is wrong, so
-everything after would be plausible-looking garbage.
+The reader treats an unknown message type, or a length prefix disagreeing with
+the specification, as fatal. Both mean the stream position is wrong, so
+everything decoded after that point would be plausible-looking garbage.
 
-This earned its keep on the first real run: the file stopped at message 58,160
-on message type `N`, which the decoder did not yet know. A parser that skipped
-unknown types would have silently desynchronised and produced a book that
-looked fine and was wrong. `N` is the Retail Price Improvement Indicator; it
-is now handled.
+The alternative, skipping unrecognised messages, is worse than useless here: a
+book built from a desynchronised stream still looks like a book. It has a bid,
+an ask, and a spread; it is simply wrong, and nothing downstream would notice.
+Refusing to guess is what makes the invariant results above mean anything.
 
 ## Layout
 
 ```
 crates/itch      ITCH 5.0 decoder and streaming reader
-crates/lob       order book state machine
-crates/replay    binary: drives a day, verifies, reports
+crates/lob       order book state machine, and BookSet session routing
+crates/replay    binary: drives a session, verifies, reports
 scripts/fetch.sh downloads a session from Nasdaq
-py/              analysis (phase 4 onward)
 data/            gitignored; fetched, never committed
 ```
 
@@ -116,7 +124,7 @@ data/            gitignored; fetched, never committed
 
 ```sh
 cargo build --release
-cargo test --release          # 27 tests
+cargo test --release          # 36 tests
 
 ./scripts/fetch.sh list                 # what Nasdaq publishes
 ./scripts/fetch.sh bx 20190730          # 391 MB, good for development

@@ -18,6 +18,10 @@
 //! result that is confidently false, so the invariants in [`Book::check`] are
 //! run over full days rather than trusted.
 
+pub mod book_set;
+
+pub use book_set::{Applied, BookSet};
+
 use itch::{Body, Side};
 use std::collections::BTreeMap;
 use std::collections::HashMap;
@@ -61,9 +65,17 @@ pub enum Event {
     /// Opening, closing, or halt cross.
     Cross { price: Price, shares: u64 },
     /// Displayed depth was added.
-    Add { side: Side, price: Price, shares: u32 },
+    Add {
+        side: Side,
+        price: Price,
+        shares: u32,
+    },
     /// Displayed depth was withdrawn, by cancel or delete.
-    Cancel { side: Side, price: Price, shares: u32 },
+    Cancel {
+        side: Side,
+        price: Price,
+        shares: u32,
+    },
 }
 
 /// Counters describing anything the stream did that the book could not
@@ -76,6 +88,13 @@ pub struct Anomalies {
     pub unknown_order_ref: u64,
     /// An execution or cancel claimed more shares than the order held.
     pub oversized_removal: u64,
+    /// An add reused an order id that was already live. Distinct from an
+    /// oversized removal: this means a removal was missed, not that a removal
+    /// was too large.
+    pub duplicate_order_id: u64,
+    /// A price level's aggregate share count and resting-order count
+    /// disagreed about whether the level was empty.
+    pub level_inconsistent: u64,
     /// Best bid met or crossed best ask outside an auction.
     pub crossed_book: u64,
 }
@@ -160,15 +179,27 @@ impl Book {
     /// `closing` marks the removal of a whole order, which also decrements
     /// the resting-order count; a partial cancel leaves the order in place.
     fn remove_depth(&mut self, side: Side, price: Price, shares: u32, closing: bool) {
-        let map = self.side_map(side);
-        if let Some(level) = map.get_mut(&price) {
-            level.shares = level.shares.saturating_sub(shares as u64);
-            if closing {
-                level.orders = level.orders.saturating_sub(1);
-            }
-            if level.shares == 0 || level.orders == 0 {
-                map.remove(&price);
-            }
+        let map = match side {
+            Side::Buy => &mut self.bids,
+            Side::Sell => &mut self.asks,
+        };
+        let Some(level) = map.get_mut(&price) else {
+            return;
+        };
+        level.shares = level.shares.saturating_sub(shares as u64);
+        if closing {
+            level.orders = level.orders.saturating_sub(1);
+        }
+        // The two counters are maintained together and should empty together.
+        // Treating disagreement as "close enough" would hide exactly the
+        // bookkeeping error that `depth_matches_orders` exists to detect, so
+        // record it before cleaning up.
+        let empty = level.shares == 0;
+        if empty != (level.orders == 0) {
+            self.anomalies.level_inconsistent += 1;
+        }
+        if empty || level.orders == 0 {
+            map.remove(&price);
         }
     }
 
@@ -198,18 +229,43 @@ impl Book {
     /// Drive the book with one message, returning any event it produced.
     pub fn apply(&mut self, body: &Body) -> Option<Event> {
         match *body {
-            Body::AddOrder { order_ref, side, shares, price, .. } => {
+            Body::AddOrder {
+                order_ref,
+                side,
+                shares,
+                price,
+                ..
+            } => {
                 // A duplicate id would silently corrupt depth. Overwriting is
                 // wrong; the venue guarantees uniqueness among live orders, so
                 // this only fires if we have lost track of a removal.
-                if self.orders.insert(order_ref, Order { side, price, shares }).is_some() {
-                    self.anomalies.oversized_removal += 1;
+                if self
+                    .orders
+                    .insert(
+                        order_ref,
+                        Order {
+                            side,
+                            price,
+                            shares,
+                        },
+                    )
+                    .is_some()
+                {
+                    self.anomalies.duplicate_order_id += 1;
                 }
                 self.add_depth(side, price, shares);
-                Some(Event::Add { side, price, shares })
+                Some(Event::Add {
+                    side,
+                    price,
+                    shares,
+                })
             }
 
-            Body::OrderExecuted { order_ref, executed_shares, .. } => {
+            Body::OrderExecuted {
+                order_ref,
+                executed_shares,
+                ..
+            } => {
                 let (order, taken, emptied) = self.take_from_order(order_ref, executed_shares)?;
                 self.remove_depth(order.side, order.price, taken, emptied);
                 Some(Event::Trade {
@@ -221,7 +277,11 @@ impl Book {
             }
 
             Body::OrderExecutedWithPrice {
-                order_ref, executed_shares, printable, execution_price, ..
+                order_ref,
+                executed_shares,
+                printable,
+                execution_price,
+                ..
             } => {
                 let (order, taken, emptied) = self.take_from_order(order_ref, executed_shares)?;
                 // Depth leaves at the order's resting price, not the price it
@@ -236,10 +296,17 @@ impl Book {
                 })
             }
 
-            Body::OrderCancel { order_ref, cancelled_shares } => {
+            Body::OrderCancel {
+                order_ref,
+                cancelled_shares,
+            } => {
                 let (order, taken, emptied) = self.take_from_order(order_ref, cancelled_shares)?;
                 self.remove_depth(order.side, order.price, taken, emptied);
-                Some(Event::Cancel { side: order.side, price: order.price, shares: taken })
+                Some(Event::Cancel {
+                    side: order.side,
+                    price: order.price,
+                    shares: taken,
+                })
             }
 
             Body::OrderDelete { order_ref } => {
@@ -251,10 +318,19 @@ impl Book {
                     }
                 };
                 self.remove_depth(order.side, order.price, order.shares, true);
-                Some(Event::Cancel { side: order.side, price: order.price, shares: order.shares })
+                Some(Event::Cancel {
+                    side: order.side,
+                    price: order.price,
+                    shares: order.shares,
+                })
             }
 
-            Body::OrderReplace { original_order_ref, new_order_ref, shares, price } => {
+            Body::OrderReplace {
+                original_order_ref,
+                new_order_ref,
+                shares,
+                price,
+            } => {
                 // Replace is delete-then-add under a new id, and loses queue
                 // priority. Side is inherited from the replaced order, since
                 // the message does not carry it.
@@ -266,20 +342,34 @@ impl Book {
                     }
                 };
                 self.remove_depth(old.side, old.price, old.shares, true);
-                self.orders.insert(new_order_ref, Order { side: old.side, price, shares });
+                self.orders.insert(
+                    new_order_ref,
+                    Order {
+                        side: old.side,
+                        price,
+                        shares,
+                    },
+                );
                 self.add_depth(old.side, price, shares);
-                Some(Event::Add { side: old.side, price, shares })
+                Some(Event::Add {
+                    side: old.side,
+                    price,
+                    shares,
+                })
             }
 
             // Hidden liquidity was never in the displayed book, so applying
             // this would double-count depth removal.
-            Body::TradeNonCross { price, shares, .. } => {
-                Some(Event::HiddenTrade { price, shares })
-            }
+            Body::TradeNonCross { price, shares, .. } => Some(Event::HiddenTrade { price, shares }),
 
-            Body::CrossTrade { cross_price, shares, .. } => {
-                Some(Event::Cross { price: cross_price, shares })
-            }
+            Body::CrossTrade {
+                cross_price,
+                shares,
+                ..
+            } => Some(Event::Cross {
+                price: cross_price,
+                shares,
+            }),
 
             Body::TradingAction { trading_state, .. } => {
                 // 'T' is trading; anything else (halted, quotation-only,
@@ -292,15 +382,25 @@ impl Book {
         }
     }
 
-    /// Check the book's invariants. Returns false and records the violation
-    /// when the book is crossed while trading normally.
-    pub fn check(&mut self) -> bool {
+    /// Whether best bid meets or crosses best ask while trading normally.
+    ///
+    /// A crossed book during a halt or auction is legitimate, so that case
+    /// reports false. Pure, so it can be called on a shared book; use
+    /// [`Book::record_cross_check`] when the violation should also be tallied.
+    pub fn is_crossed(&self) -> bool {
         if self.auction {
-            return true;
+            return false;
         }
-        if let (Some((bid, _)), Some((ask, _))) = (self.best_bid(), self.best_ask())
-            && bid >= ask
-        {
+        match (self.best_bid(), self.best_ask()) {
+            (Some((bid, _)), Some((ask, _))) => bid >= ask,
+            _ => false,
+        }
+    }
+
+    /// [`Book::is_crossed`], recording a violation in [`Book::anomalies`].
+    /// Returns true when the book is well formed.
+    pub fn record_cross_check(&mut self) -> bool {
+        if self.is_crossed() {
             self.anomalies.crossed_book += 1;
             return false;
         }
@@ -331,10 +431,8 @@ impl Book {
             };
             *m.entry(o.price).or_default() += o.shares as u64;
         }
-        let lhs_b: BTreeMap<Price, u64> =
-            self.bids.iter().map(|(&p, l)| (p, l.shares)).collect();
-        let lhs_a: BTreeMap<Price, u64> =
-            self.asks.iter().map(|(&p, l)| (p, l.shares)).collect();
+        let lhs_b: BTreeMap<Price, u64> = self.bids.iter().map(|(&p, l)| (p, l.shares)).collect();
+        let lhs_a: BTreeMap<Price, u64> = self.asks.iter().map(|(&p, l)| (p, l.shares)).collect();
         lhs_b == bids && lhs_a == asks
     }
 }
@@ -344,7 +442,14 @@ mod tests {
     use super::*;
 
     fn add(order_ref: u64, side: Side, shares: u32, price: u32) -> Body {
-        Body::AddOrder { order_ref, side, shares, price, stock: *b"TEST    ", attributed: false }
+        Body::AddOrder {
+            order_ref,
+            side,
+            shares,
+            price,
+            stock: *b"TEST    ",
+            attributed: false,
+        }
     }
 
     #[test]
@@ -378,8 +483,18 @@ mod tests {
     fn partial_cancel_leaves_the_order_resting() {
         let mut b = Book::new();
         b.apply(&add(1, Side::Buy, 100, 1000));
-        let ev = b.apply(&Body::OrderCancel { order_ref: 1, cancelled_shares: 40 });
-        assert_eq!(ev, Some(Event::Cancel { side: Side::Buy, price: 1000, shares: 40 }));
+        let ev = b.apply(&Body::OrderCancel {
+            order_ref: 1,
+            cancelled_shares: 40,
+        });
+        assert_eq!(
+            ev,
+            Some(Event::Cancel {
+                side: Side::Buy,
+                price: 1000,
+                shares: 40
+            })
+        );
         assert_eq!(b.best_bid().unwrap().1.shares, 60);
         assert_eq!(b.live_orders(), 1);
         assert!(b.depth_matches_orders());
@@ -406,7 +521,12 @@ mod tests {
         });
         assert_eq!(
             ev,
-            Some(Event::Trade { side: Side::Sell, price: 2000, shares: 200, printable: true })
+            Some(Event::Trade {
+                side: Side::Sell,
+                price: 2000,
+                shares: 200,
+                printable: true
+            })
         );
         assert_eq!(b.best_ask().unwrap().1.shares, 300);
         assert!(b.depth_matches_orders());
@@ -427,7 +547,12 @@ mod tests {
         });
         assert_eq!(
             ev,
-            Some(Event::Trade { side: Side::Sell, price: 1950, shares: 200, printable: false })
+            Some(Event::Trade {
+                side: Side::Sell,
+                price: 1950,
+                shares: 200,
+                printable: false
+            })
         );
         assert_eq!(b.best_ask().unwrap().0, 2000);
         assert_eq!(b.best_ask().unwrap().1.shares, 300);
@@ -444,7 +569,16 @@ mod tests {
             shares: 250,
             price: 1005,
         });
-        assert_eq!(b.best_bid().unwrap(), (1005, Level { shares: 250, orders: 1 }));
+        assert_eq!(
+            b.best_bid().unwrap(),
+            (
+                1005,
+                Level {
+                    shares: 250,
+                    orders: 1
+                }
+            )
+        );
         assert_eq!(b.live_orders(), 1);
         // The old id must be gone: a later message referencing it is an error.
         assert!(b.apply(&Body::OrderDelete { order_ref: 1 }).is_none());
@@ -467,7 +601,13 @@ mod tests {
             price: 1000,
             match_number: 1,
         });
-        assert_eq!(ev, Some(Event::HiddenTrade { price: 1000, shares: 999 }));
+        assert_eq!(
+            ev,
+            Some(Event::HiddenTrade {
+                price: 1000,
+                shares: 999
+            })
+        );
         assert_eq!(b.total_depth(), before);
         assert!(b.depth_matches_orders());
     }
@@ -491,7 +631,13 @@ mod tests {
     fn unknown_order_refs_are_counted_not_panicked_on() {
         let mut b = Book::new();
         assert!(b.apply(&Body::OrderDelete { order_ref: 99 }).is_none());
-        assert!(b.apply(&Body::OrderCancel { order_ref: 99, cancelled_shares: 1 }).is_none());
+        assert!(
+            b.apply(&Body::OrderCancel {
+                order_ref: 99,
+                cancelled_shares: 1
+            })
+            .is_none()
+        );
         assert_eq!(b.anomalies.unknown_order_ref, 2);
     }
 
@@ -499,8 +645,18 @@ mod tests {
     fn oversized_removal_is_clamped_and_counted() {
         let mut b = Book::new();
         b.apply(&add(1, Side::Buy, 100, 1000));
-        let ev = b.apply(&Body::OrderCancel { order_ref: 1, cancelled_shares: 500 });
-        assert_eq!(ev, Some(Event::Cancel { side: Side::Buy, price: 1000, shares: 100 }));
+        let ev = b.apply(&Body::OrderCancel {
+            order_ref: 1,
+            cancelled_shares: 500,
+        });
+        assert_eq!(
+            ev,
+            Some(Event::Cancel {
+                side: Side::Buy,
+                price: 1000,
+                shares: 100
+            })
+        );
         assert_eq!(b.anomalies.oversized_removal, 1);
         assert!(b.best_bid().is_none());
         assert!(b.depth_matches_orders());
@@ -511,7 +667,8 @@ mod tests {
         let mut b = Book::new();
         b.apply(&add(1, Side::Buy, 100, 1010));
         b.apply(&add(2, Side::Sell, 100, 1000));
-        assert!(!b.check());
+        assert!(b.is_crossed());
+        assert!(!b.record_cross_check());
         assert_eq!(b.anomalies.crossed_book, 1);
     }
 
@@ -526,11 +683,35 @@ mod tests {
         });
         b.apply(&add(1, Side::Buy, 100, 1010));
         b.apply(&add(2, Side::Sell, 100, 1000));
-        assert!(b.check());
+        assert!(!b.is_crossed());
+        assert!(b.record_cross_check());
         assert_eq!(b.anomalies.crossed_book, 0);
 
-        b.apply(&Body::TradingAction { stock: *b"TEST    ", trading_state: b'T' });
-        assert!(!b.check());
+        b.apply(&Body::TradingAction {
+            stock: *b"TEST    ",
+            trading_state: b'T',
+        });
+        assert!(b.is_crossed());
+    }
+
+    /// A one-sided book cannot be crossed, and must not be reported as such.
+    #[test]
+    fn one_sided_book_is_not_crossed() {
+        let mut b = Book::new();
+        b.apply(&add(1, Side::Buy, 100, 1000));
+        assert!(!b.is_crossed());
+        assert!(b.record_cross_check());
+    }
+
+    /// A reused order id means a removal was missed, which is a different
+    /// diagnosis from a removal that was too large.
+    #[test]
+    fn duplicate_order_id_is_counted_separately() {
+        let mut b = Book::new();
+        b.apply(&add(1, Side::Buy, 100, 1000));
+        b.apply(&add(1, Side::Buy, 100, 1000));
+        assert_eq!(b.anomalies.duplicate_order_id, 1);
+        assert_eq!(b.anomalies.oversized_removal, 0);
     }
 
     /// Depth bookkeeping and the order map are maintained separately; after a
@@ -540,14 +721,25 @@ mod tests {
         let mut b = Book::new();
         for i in 0..200u64 {
             let side = if i % 2 == 0 { Side::Buy } else { Side::Sell };
-            let price = if i % 2 == 0 { 1000 - (i as u32 % 5) } else { 1010 + (i as u32 % 5) };
+            let price = if i % 2 == 0 {
+                1000 - (i as u32 % 5)
+            } else {
+                1010 + (i as u32 % 5)
+            };
             b.apply(&add(i, side, 100 + (i as u32 % 7), price));
         }
         for i in (0..200u64).step_by(3) {
-            b.apply(&Body::OrderCancel { order_ref: i, cancelled_shares: 30 });
+            b.apply(&Body::OrderCancel {
+                order_ref: i,
+                cancelled_shares: 30,
+            });
         }
         for i in (0..200u64).step_by(5) {
-            b.apply(&Body::OrderExecuted { order_ref: i, executed_shares: 20, match_number: i });
+            b.apply(&Body::OrderExecuted {
+                order_ref: i,
+                executed_shares: 20,
+                match_number: i,
+            });
         }
         for i in (0..200u64).step_by(7) {
             b.apply(&Body::OrderReplace {

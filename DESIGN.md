@@ -54,12 +54,22 @@ cannot fetch themselves, and the fetch is scripted.
 
 ## Architecture
 
+Built:
+
 ```
-crates/itch      binary ITCH 5.0 decoder: bytes -> typed messages, zero-copy
-crates/lob       order book state machine: messages -> book snapshots + events
-crates/features  book + event stream -> feature rows at sampled timestamps
-crates/replay    the binary: orchestrates the above, writes Parquet
-py/              analysis: regressions, evaluation protocol, figures
+crates/itch      ITCH 5.0 decoder: bytes -> typed messages, no allocation
+                 per message; streaming reader over gzipped BinaryFILE
+crates/lob       order book state machine, plus BookSet, which routes a
+                 whole session into per-symbol books
+crates/replay    the binary: drives a session, verifies invariants, reports
+scripts/fetch.sh session download
+```
+
+Planned, and not yet written:
+
+```
+crates/export    book + event stream -> per-event rows on disk (phase 3)
+py/              analysis: regressions, evaluation protocol, figures (phase 4)
 ```
 
 ### `itch`
@@ -84,40 +94,81 @@ depth. The operations that matter are add, partial cancel, delete, and
 replace, where replace is a delete followed by an add with a new order id and
 loses queue priority.
 
+`BookSet` routes a session into per-symbol books. Routing is a direct index by
+the header's `stock_locate`, which every message carries, including the order
+messages that name their order only by id. An order-id to book map is
+therefore unnecessary.
+
 **Correctness is the crux of the whole project.** A book reconstruction that
 is subtly wrong produces features that are subtly wrong and a result that is
-confidently false. Three checks, all cheap and all run in CI:
+confidently false.
 
-1. **Crossed-book invariant.** Best bid must stay strictly below best ask
-   outside of the opening and closing crosses. Any violation is a hard error,
-   not a warning.
+Implemented, and run over full sessions:
+
+1. **Crossed-book invariant.** Best bid must stay below best ask during the
+   continuous session. Checked on every quote-moving message; suppressed
+   during halts and auctions, where a crossed book is legitimate.
 2. **Conservation.** Every executed and cancelled quantity must be traceable
-   to a live order of at least that size. Running the day must end with the
-   order map empty of anything not explicitly still open.
-3. **Cross-venue sanity.** Reconstructed trade prints aggregated to the minute
-   should match the venue's own published volume for that symbol and day.
+   to a live order of at least that size, and the session must end with no
+   unexplained live orders.
+3. **Independent reconciliation.** Level aggregates and the order map are
+   maintained by separate code paths; recomputing depth from the order map
+   must reproduce the incrementally maintained levels exactly.
 
-### `features`
+Not implemented: cross-venue sanity, meaning reconstructed trade prints
+aggregated to the minute compared against the venue's published volume for
+that symbol and day. This would catch a class of error the three checks above
+cannot, since all three are internal consistency checks and would all pass on
+a book that is self-consistent but systematically missing flow. Worth adding
+before any result is published.
 
-Sampled on an event clock, not a wall clock. Calendar-time sampling
-oversamples quiet periods and undersamples exactly the moments where anything
-happens; most microstructure effects are far more stable in event time.
+There is no CI. The checks run when `replay` is run.
 
-Initial feature set, all computable from the book without look-ahead:
+### `export` (planned, phase 3)
+
+**Rust emits a per-event log; Python computes every feature.** The Rust side
+writes one row per book event, carrying the pre-event and post-event top of
+book. Nothing is aggregated, smoothed, or sampled on the way out.
+
+This split is deliberate. Feature definitions will change many times during
+the study, and each change should cost a Python re-run over an existing file
+rather than a full re-parse of a multi-gigabyte session. It also means the
+same artifact serves both the regression and the point-process fit, which want
+very different views of the same events.
+
+Row schema, one per event:
+
+```
+ts_ns, kind, side, price, shares,
+bid_px, ask_px, bid_sz, ask_sz,      state before the event
+bid_px2, ask_px2, bid_sz2, ask_sz2,  state after the event
+```
+
+Carrying both sides of the event is what makes order flow imbalance
+computable without replaying the book in Python, and what gives the
+queue-reactive fit its (queue state -> transition) pairs directly.
+
+Retaining nanosecond timestamps and event types unaggregated is what the
+phase-5 model needs: a Hawkes fit is estimation on event times, and
+discretising them at export would destroy the object being estimated.
+
+Features to be computed downstream, all functions of information strictly
+before the timestamp they are stamped with:
 
 - **Order flow imbalance (OFI)**, in the Cont-Kukanov-Stoikov sense: the
-  signed change in depth at the best quotes, which is the quantity that
-  actually maps linearly to price change, rather than raw trade imbalance.
-- **Queue imbalance**: `(bid_size - ask_size) / (bid_size + ask_size)` at the
-  touch.
-- **Depth-weighted imbalance** over the first few levels.
+  signed change in depth at the best quotes, which is the quantity that maps
+  linearly to price change, rather than raw trade imbalance.
+- **Queue imbalance**: `(bid_size - ask_size) / (bid_size + ask_size)`.
 - **Trade sign imbalance** over a trailing event window.
-- **Realised spread and effective spread** at several horizons.
-- **Book slope**, a crude elasticity proxy.
+- **Realised and effective spread** at several horizons.
 
-Every feature is a function of information available strictly before the
-timestamp it is stamped with. This is stated as an invariant and tested with a
-deliberate look-ahead unit test that must fail.
+Sampling is on an event clock, not a wall clock: calendar time oversamples
+quiet periods and undersamples exactly the moments where anything happens.
+
+Format is gzipped CSV rather than Parquet. Per symbol-day the row count is in
+the millions, not the hundreds of millions, so CSV costs disk and some read
+time but no dependency and no schema tooling. Revisit if the study grows to
+many symbols across all seven days at once.
 
 ## The research question
 
