@@ -115,14 +115,32 @@ Implemented, and run over full sessions:
    maintained by separate code paths; recomputing depth from the order map
    must reproduce the incrementally maintained levels exactly.
 
-Not implemented: cross-venue sanity, meaning reconstructed trade prints
-aggregated to the minute compared against the venue's published volume for
-that symbol and day. This would catch a class of error the three checks above
-cannot, since all three are internal consistency checks and would all pass on
-a book that is self-consistent but systematically missing flow. Worth adding
-before any result is published.
+All three are internal: they ask whether a book agrees with itself, and all
+three would pass on a book that is self-consistent but systematically wrong.
+So there is a fourth, independent of them:
 
-There is no CI. The checks run when `replay` is run.
+4. **Cross-venue agreement** (`py/cross_venue_check.py`). Nasdaq and Nasdaq BX
+   publish independent streams for the same session. Reconstruct a symbol from
+   each and the two must describe one security at one price.
+
+   The comparison is on trade prints, not midpoints. BX is thin: its median
+   AAPL spread on 2019-07-30 is $0.07 against Nasdaq's $0.01, reaching $0.39
+   at p95, with 30 shares at the touch against 230. A midpoint inside a spread
+   that wide measures how a venue quotes, not whether its book is right.
+   Executions avoid that: trade-through protection pins prints on both venues
+   to the same national best bid and offer.
+
+   Its limit: both sides run the same decoder and book, so a bug affecting
+   both venues identically would not appear. It catches data-dependent errors,
+   not shared logic errors.
+
+Still not implemented: comparison against the venue's *own published* daily
+volume per symbol, which is the only check that would catch flow missing from
+both venues at once. It needs an external reference the project does not
+currently pull.
+
+There is no CI. The checks run when `replay`, `py/validate_export.py` or
+`py/cross_venue_check.py` are run.
 
 ### `export` (planned, phase 3)
 

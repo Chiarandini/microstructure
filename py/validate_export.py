@@ -70,6 +70,21 @@ def validate(df, path):
         f"{(~in_session).sum():,} outside",
     )
 
+    # The session filter should clip at the boundaries, not merely near them.
+    # A file starting minutes late would mean events are being dropped.
+    span_start = (df.ts_ns.min() - SESSION_OPEN_NS) / 1e9
+    span_end = (SESSION_CLOSE_NS - df.ts_ns.max()) / 1e9
+    c.check(
+        "coverage starts at the opening bell",
+        span_start < 1.0,
+        f"first event {span_start:.3f}s after 09:30",
+    )
+    c.check(
+        "coverage runs to the closing bell",
+        span_end < 60.0,
+        f"last event {span_end:.3f}s before 16:00",
+    )
+
     # A two-sided book must never be crossed. This is the same invariant the
     # Rust asserts, re-checked on the artifact rather than on the live book,
     # so a bug in the writer cannot hide behind a correct reconstruction.
@@ -97,50 +112,91 @@ def validate(df, path):
     )
     c.check("price and size agree on emptiness", not bool((bad_bid | bad_ask).any()))
 
-    # The look-ahead invariant, restated on the artifact: an add that lands
-    # exactly at the prevailing best bid must increase bid size by its own
-    # shares, and must not already be included in the `before` snapshot.
-    at_bid = (
-        (df.event == "add")
-        & (df.side == "B")
-        & df.bid_px_before.notna()
-        & (df.price == df.bid_px_before)
-    )
-    if at_bid.any():
-        sub = df[at_bid]
-        delta = sub.bid_sz_after - sub.bid_sz_before
-        c.check(
-            "adds at the touch move size by exactly their own shares",
-            bool((delta == sub.shares).all()),
-            f"{(delta != sub.shares).sum():,} of {at_bid.sum():,} mismatched",
-        )
+    # Every touch-level check below runs on both sides. Checking only the bid
+    # would leave a sell-side-only defect invisible, and the two sides are
+    # maintained by separate map entries in the book.
+    for side, label in (("B", "bid"), ("S", "ask")):
+        px_b, px_a = f"{label}_px_before", f"{label}_px_after"
+        sz_b, sz_a = f"{label}_sz_before", f"{label}_sz_after"
 
-    # A replace is a cancel plus a resubmission. Its net effect on bid size is
-    # the new leg (if it rests at the touch) minus the old leg (if it was
-    # resting there). Checking that decomposition is what caught the earlier
-    # version of this exporter labelling replaces as plain adds.
-    #
-    # Restricted to replaces that left the touch price unchanged. When the
-    # withdrawn leg was the only order at the best bid, removing it moves the
-    # best bid, and `bid_sz_after` then describes a different price level, so
-    # the arithmetic below does not apply. That is correct behaviour, not an
-    # error, and is reported separately.
-    rep = (
-        (df.event == "replace")
-        & (df.side == "B")
-        & df.bid_px_before.notna()
-        & (df.bid_px_after == df.bid_px_before)
-    )
-    if rep.any():
-        sub = df[rep]
-        added = np.where(sub.price == sub.bid_px_before, sub.shares, 0)
-        removed = np.where(sub.old_price == sub.bid_px_before, sub.old_shares, 0)
-        delta = (sub.bid_sz_after - sub.bid_sz_before).to_numpy()
-        c.check(
-            "replaces decompose into their new and old legs",
-            bool((delta == added - removed).all()),
-            f"{(delta != added - removed).sum():,} of {rep.sum():,} at a fixed touch",
+        # The look-ahead invariant, restated on the artifact: an order that
+        # lands exactly at the prevailing touch must move size by its own
+        # shares, and must not already be included in the `before` snapshot.
+        at_touch = (
+            (df.event == "add") & (df.side == side) & df[px_b].notna() & (df.price == df[px_b])
         )
+        if at_touch.any():
+            sub = df[at_touch]
+            delta = sub[sz_a] - sub[sz_b]
+            c.check(
+                f"adds at the {label} move size by exactly their own shares",
+                bool((delta == sub.shares).all()),
+                f"{(delta != sub.shares).sum():,} of {at_touch.sum():,} mismatched",
+            )
+
+        # A cancel at the touch removes its own shares, unless it emptied the
+        # level and moved the price, in which case the two sizes describe
+        # different levels.
+        cx = (
+            (df.event == "cancel")
+            & (df.side == side)
+            & df[px_b].notna()
+            & (df.price == df[px_b])
+            & (df[px_a] == df[px_b])
+        )
+        if cx.any():
+            sub = df[cx]
+            delta = sub[sz_b] - sub[sz_a]
+            c.check(
+                f"cancels at the {label} remove exactly their own shares",
+                bool((delta == sub.shares).all()),
+                f"{(delta != sub.shares).sum():,} of {cx.sum():,} at a fixed touch",
+            )
+
+        # A trade consumes resting depth on the side it executed against.
+        # Execute-with-price prints away from the resting price, so restrict
+        # to trades whose price is the touch.
+        tr = (
+            (df.event == "trade")
+            & (df.side == side)
+            & df[px_b].notna()
+            & (df.price == df[px_b])
+            & (df[px_a] == df[px_b])
+        )
+        if tr.any():
+            sub = df[tr]
+            delta = sub[sz_b] - sub[sz_a]
+            c.check(
+                f"trades at the {label} consume exactly their own shares",
+                bool((delta == sub.shares).all()),
+                f"{(delta != sub.shares).sum():,} of {tr.sum():,} at a fixed touch",
+            )
+
+        # A replace is a cancel plus a resubmission, so its net effect is the
+        # new leg (if it rests at the touch) minus the old leg (if it was
+        # resting there). This decomposition is what caught the earlier
+        # version of this exporter labelling replaces as plain adds.
+        #
+        # Restricted to replaces that left the touch price unchanged: when the
+        # withdrawn leg was the only order there, removing it moves the touch
+        # and the two sizes describe different levels. That is correct
+        # behaviour, not an error, and is reported separately below.
+        rep = (
+            (df.event == "replace")
+            & (df.side == side)
+            & df[px_b].notna()
+            & (df[px_a] == df[px_b])
+        )
+        if rep.any():
+            sub = df[rep]
+            added = np.where(sub.price == sub[px_b], sub.shares, 0)
+            removed = np.where(sub.old_price == sub[px_b], sub.old_shares, 0)
+            delta = (sub[sz_a] - sub[sz_b]).to_numpy()
+            c.check(
+                f"replaces at the {label} decompose into new and old legs",
+                bool((delta == added - removed).all()),
+                f"{(delta != added - removed).sum():,} of {rep.sum():,} at a fixed touch",
+            )
 
     all_rep = df.event == "replace"
     if all_rep.any():
@@ -149,8 +205,6 @@ def validate(df, path):
             "replaces carry a withdrawn leg",
             bool(sub.old_price.notna().all() and sub.old_shares.notna().all()),
         )
-        moved = (sub.bid_px_after != sub.bid_px_before) & sub.bid_px_before.notna()
-        print(f"    ({moved.sum():,} replaces moved the bid touch)")
 
     non_replace = df.event != "replace"
     c.check(

@@ -122,6 +122,44 @@ price its net depth effect is `new - old`, not `new`. Treating it as a
 submission overstates incoming liquidity and hands a point-process model the
 wrong mark. It now has its own label and carries the withdrawn leg.
 
+## Verification of the panel
+
+Three properties, checked rather than assumed, before any analysis rests on
+this data.
+
+**Every exported row is re-checked on the artifact.** 1,120 checks across the
+56 files, all passing: timestamps monotone, coverage running from the opening
+bell to the closing one, no crossed book, price and size agreeing about
+whether a side is empty, and, on *both* sides independently, that adds move
+the touch by their own size, cancels and trades remove their own size, and
+replaces decompose into their two legs.
+
+**Replay is deterministic.** Re-exporting a session reproduces all eight files
+byte-for-byte, and the row counts match [`PANEL.md`](PANEL.md). The
+reproducibility claim there is tested, not asserted.
+
+**Two venues agree.** Every check above is internal: it asks whether a book
+agrees with itself, and all of them would pass on a book that is
+self-consistent but systematically wrong. Nasdaq and Nasdaq BX publish
+independent streams for the same session, so reconstructing a symbol from each
+gives two independent views of one price. BX prints land against the *Nasdaq*
+mid about as tightly as Nasdaq's own prints land against it:
+
+| | BX print vs Nasdaq mid | Nasdaq print vs Nasdaq mid |
+|---|---|---|
+| AAPL | 0.50c median, 3.50c p95, 97.6% within 5c | 0.50c, 3.00c, 98.1% |
+| MSFT | 0.50c, 2.50c, 99.2% | 0.50c, 2.50c, 99.3% |
+| INTC | 0.50c, 1.50c, 99.9% | 0.50c, 1.50c, 99.9% |
+
+A half-cent median is half a one-cent spread, which is where a print resting
+at the bid or ask should sit. The venues are crossed against each other in
+0.006% of seconds, which is the transient arbitrage you would expect rather
+than a standing one.
+
+```sh
+python3 py/cross_venue_check.py AAPL MSFT INTC
+```
+
 ## Failing loudly
 
 The reader treats an unknown message type, or a length prefix disagreeing with
