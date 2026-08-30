@@ -18,7 +18,7 @@ are in [`DESIGN.md`](DESIGN.md).
 | 3b. Study panel built | done |
 | 3c. Feature construction, validated | done |
 | 4. OFI predictability study | done |
-| 5. Extension: fitted queue-reactive / Hawkes model | next |
+| 5. Fitted queue-reactive model | done |
 | 6. Writeup | drafted below |
 
 The result is in **[Result](#result)** below. Everything before it is the
@@ -299,6 +299,73 @@ any result existed rather than added afterwards.
 ```sh
 python3 py/build_buckets.py 200
 python3 py/study_ofi.py --k 200
+```
+
+## The book is state-dependent
+
+Phase 5 asks a different question from phase 4. Rather than predicting price,
+it asks whether the queue at the best quote is a *homogeneous* process at all.
+
+The queue is modelled as a continuous-time Markov chain leaving each state
+through one of four channels: a limit order joining (L), a cancellation (C), a
+market order consuming (M), or a price move replacing the queue (P). For a
+Markov jump process the maximum-likelihood intensity is just departures over
+time at risk, `N_k(q) / T(q)`, so a whole session reduces to two small tables.
+Rates are shrunk towards their pooled value under a weak Gamma prior worth one
+pseudo-event, because a raw `N/T` assigns exactly zero to any state where a
+channel happened not to fire, which asserts impossibility and makes held-out
+likelihood negatively infinite.
+
+AAPL bid, training sessions, intensities in events per second:
+
+| queue (shares) | time (s) | λ_L | λ_C | λ_M | λ_P |
+|---|---|---|---|---|---|
+| 3-5 | 422 | 3.11 | 0.04 | 0.22 | 4.06 |
+| 41-62 | 2,862 | 2.94 | 0.91 | 0.47 | 2.95 |
+| 94-141 | 19,933 | 5.61 | 1.46 | 0.81 | 3.98 |
+| 214-323 | 14,975 | 3.73 | 3.78 | 0.82 | 1.20 |
+| 488-737 | 10,249 | 3.90 | 6.64 | 0.74 | 3.26 |
+| 1113-1682 | 1,149 | 5.70 | 8.08 | 1.40 | 3.50 |
+
+**Cancellation intensity rises by more than two orders of magnitude across the
+range while limit arrival stays roughly flat.** That is the Huang-Lehalle-
+Rosenbaum finding, reproduced. It is also the mechanism that makes a deep queue
+mean-revert rather than drift: depth attracts cancellation, not more depth.
+
+The per-share cancellation hazard is not constant either. At 100 shares it is
+about 0.0146/s, at 250 shares 0.0151/s, but by 1,400 shares only 0.0058/s. An
+order sitting in a large queue is roughly three times *less* likely to be
+pulled per share than one in a small queue.
+
+### Does the state dependence earn its parameters?
+
+Against a homogeneous Poisson null with the same four channels and constant
+rates, both fit on the training sessions and judged on the held-out ones.
+
+| | queue-reactive | Poisson null |
+|---|---|---|
+| held-out log-likelihood, wins | **15 of 16** symbol-sides | 1 of 16 |
+| median gain | **+0.069 nats/event** | |
+| total gain | **+1,020,540 nats** over 16.3 M held-out events | |
+| free intensities | 92 per symbol-side | 4 |
+| simulated occupancy, closer | **14 of 16** | 2 of 16 |
+| median total variation | **0.196** | 0.249 |
+
+Held-out likelihood is the sharp test: it involves no simulation and no choice
+of summary statistic, and 88 extra parameters buying over a million nats is not
+a close call. CSCO's ask side is the one loss, at −0.029 nats/event.
+
+The generative test is deliberately harder and the margin is smaller. Neither
+model was fit to the stationary occupancy distribution — estimation used
+holding times and departure counts state by state — and both simulations draw
+from the *same* empirical event-size and restart distributions, so the Poisson
+null inherits a great deal of realistic structure. It is a strong baseline
+rather than a straw man, which is why it closes to within 0.05 total variation
+even while being decisively rejected on likelihood.
+
+```sh
+python3 py/build_queue_states.py
+python3 py/study_queue_reactive.py
 ```
 
 ## Failing loudly
