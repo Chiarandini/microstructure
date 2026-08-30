@@ -1,0 +1,4 @@
+{
+  "extraPaths": ["py"],
+  "reportMissingImports": "warning"
+}

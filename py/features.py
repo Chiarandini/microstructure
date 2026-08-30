@@ -19,30 +19,14 @@ Sign conventions, which are the part that is easy to get silently wrong:
 import numpy as np
 import pandas as pd
 
-# ITCH prices are fixed-point with four implied decimals.
-TICK = 10_000
+from schema import COLUMNS, DTYPES, TICK
 
-EVENT_COLUMNS = [
-    "ts_ns",
-    "event",
-    "side",
-    "price",
-    "shares",
-    "printable",
-    "resting_price",
-    "bid_px_before",
-    "ask_px_before",
-    "bid_sz_before",
-    "ask_sz_before",
-    "bid_px_after",
-    "ask_px_after",
-    "bid_sz_after",
-    "ask_sz_after",
-]
+EVENT_COLUMNS = COLUMNS
 
 
 def load_events(path, columns=None):
-    return pd.read_csv(path, usecols=columns or EVENT_COLUMNS)
+    cols = columns or COLUMNS
+    return pd.read_csv(path, usecols=cols, dtype={k: v for k, v in DTYPES.items() if k in cols})
 
 
 def two_sided(df):
@@ -120,15 +104,11 @@ def tape_trades(df):
     holds, and on AAPL those trades produce a negative effective spread, which
     is the arithmetic signature of a mislabelled aggressor.
 
-    About 1% of AAPL executions are excluded here. They remain in the file and
-    still consume depth through the OFI path, which does not depend on any
+    About 1.3% of AAPL executions are excluded here. They remain in the file
+    and still consume depth through the OFI path, which does not depend on any
     signing rule.
     """
-    return (
-        (df.event == "trade")
-        & (df.printable == 1)
-        & (df.price == df.resting_price)
-    )
+    return (df.event == "trade") & (df.printable == 1) & (df.price == df.resting_price)
 
 
 def aggressor_sign(df):
@@ -137,8 +117,8 @@ def aggressor_sign(df):
     ITCH reports the side of the resting order that was executed, so the
     aggressor is the opposite: an execution against a resting buy order means
     an incoming sell. Getting this backwards inverts every trade-flow feature
-    and drives the effective spread negative, which is why
-    `effective_spread` doubles as the test for it.
+    and drives the effective spread negative, which is why `effective_spread`
+    doubles as the test for it.
 
     Defined only on `tape_trades`; zero elsewhere, including on executions
     whose aggressor cannot be identified.
@@ -176,51 +156,62 @@ def signed_volume(df):
     return aggressor_sign(df) * df.shares
 
 
-def event_buckets(df, k):
-    """Bucket index for a fixed number of events per bucket.
+def aggregate(df, k):
+    """Per-bucket features on a `k`-event clock.
 
     An event clock, not a wall clock. Calendar-time sampling oversamples quiet
     periods and undersamples exactly the moments when anything happens, and
     most microstructure relationships are far more stable in event time.
+
+    Bucket `i` covers rows `[i*k, (i+1)*k)`. A ragged final bucket is dropped:
+    it spans fewer events than the rest and its summed order flow would not be
+    comparable.
+
+    `mid_start` is the mid *before the first event of the bucket*, taken by
+    position rather than by a groupby aggregate. That distinction matters:
+    pandas' `first()` skips nulls, so on a bucket opening with a one-sided
+    book it would silently return a mid from later in the bucket. Taking it
+    positionally keeps `mid_start` a true boundary value, NaN included.
+
+    Only boundary mids are returned, and deliberately no `mid_end`. The price
+    change over bucket `i` is `mid_start[i+1] - mid_start[i]`, and forward
+    returns are differences of later `mid_start` values. Defining every price
+    change from the same boundary series makes it impossible to accidentally
+    build a window that overlaps its own feature.
     """
-    return np.arange(len(df)) // k
+    n = len(df)
+    nb = n // k
+    if nb == 0:
+        return pd.DataFrame(
+            columns=[
+                "ts_start", "ofi", "signed_volume", "trades",
+                "qi_start", "qi_mean", "spread_start", "spread_mean", "mid_start",
+            ]
+        )
 
+    trimmed = slice(0, nb * k)
+    starts = np.arange(nb) * k
 
-def aggregate(df, k):
-    """Per-bucket features on a `k`-event clock.
+    def block_sum(series):
+        return series.to_numpy()[trimmed].reshape(nb, k).sum(axis=1)
 
-    Returns one row per bucket with the summed order flow imbalance, summed
-    signed volume, trade count, and the mid at the bucket's start and end.
+    def block_mean(series):
+        return series.to_numpy()[trimmed].reshape(nb, k).mean(axis=1)
 
-    `mid_end` is included because the study needs it, but nothing in this
-    module relates it to any feature: constructing a predictor and evaluating
-    it are deliberately separate steps.
-    """
-    b = event_buckets(df, k)
-    work = pd.DataFrame(
+    qi = queue_imbalance(df)
+    spread = spread_before(df)
+    mid = mid_before(df)
+
+    return pd.DataFrame(
         {
-            "bucket": b,
-            "ts_ns": df.ts_ns.to_numpy(),
-            "ofi": ofi(df).to_numpy(),
-            "signed_volume": signed_volume(df).to_numpy(),
-            "is_trade": tape_trades(df).to_numpy(),
-            "mid": mid_before(df).to_numpy(),
-            "qi": queue_imbalance(df).to_numpy(),
-            "spread": spread_before(df).to_numpy(),
+            "ts_start": df.ts_ns.to_numpy()[starts],
+            "ofi": block_sum(ofi(df)),
+            "signed_volume": block_sum(signed_volume(df)),
+            "trades": block_sum(tape_trades(df).astype("float64")),
+            "qi_start": qi.to_numpy()[starts],
+            "qi_mean": block_mean(qi),
+            "spread_start": spread.to_numpy()[starts],
+            "spread_mean": block_mean(spread),
+            "mid_start": mid.to_numpy()[starts],
         }
     )
-    g = work.groupby("bucket", sort=True)
-    out = pd.DataFrame(
-        {
-            "ts_start": g.ts_ns.first(),
-            "ts_end": g.ts_ns.last(),
-            "ofi": g.ofi.sum(),
-            "signed_volume": g.signed_volume.sum(),
-            "trades": g.is_trade.sum(),
-            "qi_mean": g.qi.mean(),
-            "spread_mean": g.spread.mean(),
-            "mid_start": g.mid.first(),
-            "mid_end": g.mid.last(),
-        }
-    )
-    return out.reset_index(drop=True)

@@ -15,34 +15,12 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-# ITCH prices are fixed-point with four implied decimals.
-TICK = 10_000
-SESSION_OPEN_NS = int(9.5 * 3600 * 1e9)
-SESSION_CLOSE_NS = int(16 * 3600 * 1e9)
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from schema import DTYPES, SESSION_CLOSE_NS, SESSION_OPEN_NS, TICK
 
 
 def load(path):
-    df = pd.read_csv(
-        path,
-        dtype={
-            "ts_ns": "int64",
-            "event": "category",
-            "side": "category",
-            "price": "int64",
-            "shares": "int64",
-            "old_price": "float64",
-            "old_shares": "float64",
-            "bid_px_before": "float64",
-            "ask_px_before": "float64",
-            "bid_sz_before": "int64",
-            "ask_sz_before": "int64",
-            "bid_px_after": "float64",
-            "ask_px_after": "float64",
-            "bid_sz_after": "int64",
-            "ask_sz_after": "int64",
-        },
-    )
-    return df
+    return pd.read_csv(path, dtype=DTYPES)
 
 
 class Checks:

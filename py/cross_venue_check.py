@@ -28,7 +28,9 @@ from pathlib import Path
 
 import pandas as pd
 
-TICK = 10_000
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from schema import TICK
+
 EVENTS = Path("data/events")
 EVENTS_BX = Path("data/events_bx")
 SESSION = "20190730"
