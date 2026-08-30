@@ -37,6 +37,18 @@ pub struct Order {
     pub shares: u32,
 }
 
+/// The best bid and ask at an instant.
+///
+/// Prices are `None` when that side is empty, which is common outside the
+/// continuous session and must not be conflated with a price of zero.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TopOfBook {
+    pub bid_px: Option<Price>,
+    pub ask_px: Option<Price>,
+    pub bid_sz: u64,
+    pub ask_sz: u64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Level {
     pub shares: u64,
@@ -75,6 +87,21 @@ pub enum Event {
         side: Side,
         price: Price,
         shares: u32,
+    },
+    /// An order was withdrawn and resubmitted under a new id, losing queue
+    /// priority.
+    ///
+    /// Distinct from an [`Event::Add`] because it is economically a
+    /// cancellation plus a submission: the net depth change is
+    /// `new_shares - old_shares` wherever both legs sit at the same price,
+    /// not `new_shares`. Collapsing it into an add misstates order flow and
+    /// hands a point-process model the wrong mark.
+    Replace {
+        side: Side,
+        old_price: Price,
+        old_shares: u32,
+        new_price: Price,
+        new_shares: u32,
     },
 }
 
@@ -139,6 +166,18 @@ impl Book {
         match (self.best_bid(), self.best_ask()) {
             (Some((b, _)), Some((a, _))) => Some(a.saturating_sub(b)),
             _ => None,
+        }
+    }
+
+    /// Snapshot of the best bid and ask.
+    pub fn top_of_book(&self) -> TopOfBook {
+        let bid = self.best_bid();
+        let ask = self.best_ask();
+        TopOfBook {
+            bid_px: bid.map(|(p, _)| p),
+            ask_px: ask.map(|(p, _)| p),
+            bid_sz: bid.map_or(0, |(_, l)| l.shares),
+            ask_sz: ask.map_or(0, |(_, l)| l.shares),
         }
     }
 
@@ -351,10 +390,12 @@ impl Book {
                     },
                 );
                 self.add_depth(old.side, price, shares);
-                Some(Event::Add {
+                Some(Event::Replace {
                     side: old.side,
-                    price,
-                    shares,
+                    old_price: old.price,
+                    old_shares: old.shares,
+                    new_price: price,
+                    new_shares: shares,
                 })
             }
 
@@ -557,6 +598,32 @@ mod tests {
         assert_eq!(b.best_ask().unwrap().0, 2000);
         assert_eq!(b.best_ask().unwrap().1.shares, 300);
         assert!(b.depth_matches_orders());
+    }
+
+    /// A replace at the same price nets out to `new - old`, which is why it
+    /// cannot be reported as a plain add.
+    #[test]
+    fn replace_at_the_same_price_reports_both_legs() {
+        let mut b = Book::new();
+        b.apply(&add(1, Side::Buy, 100, 1000));
+        let ev = b.apply(&Body::OrderReplace {
+            original_order_ref: 1,
+            new_order_ref: 2,
+            shares: 250,
+            price: 1000,
+        });
+        assert_eq!(
+            ev,
+            Some(Event::Replace {
+                side: Side::Buy,
+                old_price: 1000,
+                old_shares: 100,
+                new_price: 1000,
+                new_shares: 250,
+            })
+        );
+        // Net depth change is +150, not +250.
+        assert_eq!(b.best_bid().unwrap().1.shares, 250);
     }
 
     #[test]

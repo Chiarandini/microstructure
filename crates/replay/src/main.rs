@@ -1,8 +1,10 @@
 //! Replay an ITCH session: reconstruct books, verify invariants, report.
 
 use clap::Parser;
+use export::EventWriter;
 use itch::{Body, MessageKind};
 use lob::BookSet;
+use std::path::Path;
 use std::time::Instant;
 
 #[derive(Parser)]
@@ -23,6 +25,18 @@ struct Args {
     /// Expensive; 0 checks only at the end.
     #[arg(long, default_value_t = 0)]
     reconcile_every: u64,
+
+    /// Write a per-event CSV per tracked symbol into this directory.
+    ///
+    /// Requires `--symbols`: exporting every symbol of a session would write
+    /// hundreds of millions of rows, which is not a thing anyone wants by
+    /// accident.
+    #[arg(long)]
+    out_dir: Option<String>,
+
+    /// Restrict exported events to the continuous session.
+    #[arg(long, default_value_t = false)]
+    session_only: bool,
 }
 
 /// Continuous session, 09:30 to 16:00 ET, as nanoseconds since midnight.
@@ -40,6 +54,7 @@ struct Summary {
     last_ts: u64,
     cross_checks: u64,
     cross_failures: u64,
+    exported: u64,
     elapsed: std::time::Duration,
 }
 
@@ -65,6 +80,11 @@ fn main() {
         None => BookSet::all(),
     };
 
+    if args.out_dir.is_some() && args.symbols.is_none() {
+        eprintln!("--out-dir requires --symbols");
+        std::process::exit(1);
+    }
+
     let summary = match replay(&mut reader, &mut books, &args) {
         Ok(s) => s,
         Err(e) => {
@@ -74,6 +94,19 @@ fn main() {
     };
 
     report(&args, &summary, &books);
+}
+
+/// Session identifier used to prefix exported files.
+///
+/// Only `.gz` is stripped: the rest of the name carries the date and venue
+/// (`20190730.NASDAQ_ITCH50`), which is exactly what distinguishes one
+/// exported session from another.
+fn session_stem(path: &str) -> String {
+    let name = Path::new(path)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "session".to_string());
+    name.strip_suffix(".gz").unwrap_or(&name).to_string()
 }
 
 fn replay<R: std::io::Read>(
@@ -87,6 +120,14 @@ fn replay<R: std::io::Read>(
     let mut last_ts = 0u64;
     let mut cross_checks = 0u64;
     let mut cross_failures = 0u64;
+
+    let mut writer = match &args.out_dir {
+        Some(dir) => Some(
+            EventWriter::new(dir, &session_stem(&args.path))
+                .map_err(|e| format!("cannot open {dir}: {e}"))?,
+        ),
+        None => None,
+    };
 
     let start = Instant::now();
 
@@ -104,17 +145,37 @@ fn replay<R: std::io::Read>(
             last_ts = last_ts.max(header.timestamp);
         }
 
+        let in_session = (SESSION_OPEN_NS..=SESSION_CLOSE_NS).contains(&header.timestamp);
+
+        // Snapshot before applying, so the exported row's `before` columns
+        // cannot contain the event on that row. Routing is an array index, so
+        // this costs nothing on runs that are not exporting.
+        let before = writer.as_ref().and_then(|_| {
+            books
+                .route(header.stock_locate)
+                .map(|idx| (idx, books.book(idx).top_of_book()))
+        });
+
         if let Some(applied) = books.apply(&header, &body) {
             // Only quote-moving messages can newly cross the book, so
             // checking on the others would cost time without finding
             // anything the next add or replace would not.
             let quote_moving = matches!(body, Body::AddOrder { .. } | Body::OrderReplace { .. });
-            let in_session = (SESSION_OPEN_NS..=SESSION_CLOSE_NS).contains(&header.timestamp);
             if quote_moving && in_session {
                 cross_checks += 1;
                 if !books.book_mut(applied.book).record_cross_check() {
                     cross_failures += 1;
                 }
+            }
+
+            if let (Some(w), Some((idx, before)), Some(event)) =
+                (writer.as_mut(), before, applied.event)
+                && (in_session || !args.session_only)
+            {
+                let after = books.book(idx).top_of_book();
+                let symbol = books.symbol(idx);
+                w.write(idx, symbol, header.timestamp, &event, &before, &after)
+                    .map_err(|e| format!("writing {symbol}: {e}"))?;
             }
         }
 
@@ -133,6 +194,15 @@ fn replay<R: std::io::Read>(
         }
     }
 
+    let mut exported = 0;
+    if let Some(w) = writer.as_mut() {
+        // Unterminated gzip streams are unreadable, so this is not optional
+        // and must happen before the elapsed time is taken.
+        w.finish()
+            .map_err(|e| format!("closing export files: {e}"))?;
+        exported = w.total_rows();
+    }
+
     Ok(Summary {
         counts,
         total,
@@ -140,6 +210,7 @@ fn replay<R: std::io::Read>(
         last_ts,
         cross_checks,
         cross_failures,
+        exported,
         elapsed: start.elapsed(),
     })
 }
@@ -186,6 +257,10 @@ fn report(args: &Args, s: &Summary, books: &BookSet) {
             "DIVERGED"
         }
     );
+    if let Some(dir) = &args.out_dir {
+        println!();
+        println!("exported            {:>13} rows to {dir}", s.exported);
+    }
     for symbol in diverged.iter().take(10) {
         println!("    diverged: {symbol}");
     }

@@ -139,10 +139,16 @@ very different views of the same events.
 Row schema, one per event:
 
 ```
-ts_ns, kind, side, price, shares,
-bid_px, ask_px, bid_sz, ask_sz,      state before the event
-bid_px2, ask_px2, bid_sz2, ask_sz2,  state after the event
+ts_ns, event, side, price, shares,
+old_price, old_shares,                            withdrawn leg of a replace
+bid_px_before, ask_px_before, bid_sz_before, ask_sz_before,
+bid_px_after,  ask_px_after,  bid_sz_after,  ask_sz_after
 ```
+
+A replace is labelled `replace`, not `add`. It is a cancellation plus a
+resubmission that loses queue priority, so where both legs rest at the same
+price its net depth effect is `new - old`. The withdrawn leg is carried so a
+consumer can decompose it without replaying the book.
 
 Carrying both sides of the event is what makes order flow imbalance
 computable without replaying the book in Python, and what gives the

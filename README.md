@@ -14,8 +14,8 @@ are in [`DESIGN.md`](DESIGN.md).
 | 0. Data fetch and skeleton | done |
 | 1. ITCH 5.0 decoder | done |
 | 2. Book reconstruction, validated | done |
-| 3. Feature extraction and export | next |
-| 4. OFI predictability study | not started |
+| 3. Per-event export, validated | done |
+| 4. OFI predictability study | next |
 | 5. Extension: cross-impact or a fitted queue-reactive model | not started |
 | 6. Writeup | not started |
 
@@ -99,6 +99,28 @@ Decompression is about a quarter of wall time (`gunzip` alone on the BX
 session is 0.98 s against a 3.73 s replay), so a faster inflate backend is
 worth perhaps 15%. Not currently a priority.
 
+## Export
+
+`--symbols X,Y --out-dir D` writes one gzipped CSV per symbol, one row per
+book event, carrying the top of book both before and after. Rust writes
+events; Python computes features. Feature definitions will change many times
+during the study, and each change should cost a re-read of these files rather
+than a re-parse of a multi-gigabyte session.
+
+Exporting AAPL, MSFT, and SPY from the full Nasdaq session takes 24.6 s and
+produces 4.37 M rows. `py/validate_export.py` then re-checks the artifact
+rather than trusting it, including the crossed-book invariant, that a price
+and its size agree about whether a side is empty, that an add at the touch
+moves depth by exactly its own size, and that a replace decomposes into its
+two legs.
+
+That validator immediately caught a real modelling error: replaces were being
+exported as plain `add` events. A replace is a cancellation plus a
+resubmission that loses queue priority, so where both legs rest at the same
+price its net depth effect is `new - old`, not `new`. Treating it as a
+submission overstates incoming liquidity and hands a point-process model the
+wrong mark. It now has its own label and carries the withdrawn leg.
+
 ## Failing loudly
 
 The reader treats an unknown message type, or a length prefix disagreeing with
@@ -115,8 +137,10 @@ Refusing to guess is what makes the invariant results above mean anything.
 ```
 crates/itch      ITCH 5.0 decoder and streaming reader
 crates/lob       order book state machine, and BookSet session routing
-crates/replay    binary: drives a session, verifies, reports
+crates/export    per-event rows to gzipped CSV, one file per symbol
+crates/replay    binary: drives a session, verifies, exports, reports
 scripts/fetch.sh downloads a session from Nasdaq
+py/              analysis; currently the export validator
 data/            gitignored; fetched, never committed
 ```
 
@@ -124,7 +148,7 @@ data/            gitignored; fetched, never committed
 
 ```sh
 cargo build --release
-cargo test --release          # 36 tests
+cargo test --release          # 45 tests
 
 ./scripts/fetch.sh list                 # what Nasdaq publishes
 ./scripts/fetch.sh bx 20190730          # 391 MB, good for development
@@ -132,6 +156,11 @@ cargo test --release          # 36 tests
 
 ./target/release/replay data/raw/20190730.BX_ITCH_50.gz
 ./target/release/replay data/raw/20190730.BX_ITCH_50.gz --symbols AAPL,MSFT
+
+# export per-event rows, then check the artifact rather than trusting it
+./target/release/replay data/raw/20190730.NASDAQ_ITCH50.gz \
+    --symbols AAPL,MSFT,SPY --out-dir data/events --session-only
+python3 py/validate_export.py data/events/*.csv.gz
 ```
 
 `--reconcile-every N` runs the full depth-versus-order-map reconciliation

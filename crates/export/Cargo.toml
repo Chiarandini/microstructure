@@ -1,10 +1,9 @@
 [package]
-name = "replay"
+name = "export"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
 itch = { path = "../itch" }
 lob = { path = "../lob" }
-export = { path = "../export" }
-clap = { version = "4", features = ["derive"] }
+flate2 = "1.0"

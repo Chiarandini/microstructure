@@ -120,6 +120,18 @@ impl BookSet {
         self.symbols.push(name.to_string());
     }
 
+    /// Book index a locate routes to, without applying anything.
+    ///
+    /// A flat array index, so a caller that needs the book state *before* a
+    /// message is applied can take a snapshot without paying for one on
+    /// every message of a full-session run.
+    pub fn route(&self, locate: u16) -> Option<usize> {
+        match self.by_locate[locate as usize] {
+            UNTRACKED => None,
+            idx => Some(idx as usize),
+        }
+    }
+
     /// Route a message to its book and apply it.
     ///
     /// Returns `None` when the message belongs to an untracked symbol or is
