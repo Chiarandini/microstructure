@@ -16,8 +16,8 @@
 //! that row. Any predictor built from them uses only information available
 //! before the event occurred. The `*_after` columns are the outcome and must
 //! never be used as a feature for the same row. This is the one invariant a
-//! downstream analysis can violate silently, so it is stated here and tested
-//! in [`tests::before_excludes_the_event_itself`].
+//! downstream analysis can violate silently, so it is stated here and covered
+//! by a test that asserts a row's `before` excludes its own event.
 
 use flate2::Compression;
 use flate2::write::GzEncoder;
@@ -147,10 +147,6 @@ impl EventWriter {
 
     pub fn path_for(&self, symbol: &str) -> PathBuf {
         self.dir.join(format!("{}_{symbol}.csv.gz", self.stem))
-    }
-
-    pub fn rows_written(&self, book: usize) -> u64 {
-        self.rows.get(book).copied().unwrap_or(0)
     }
 
     pub fn total_rows(&self) -> u64 {

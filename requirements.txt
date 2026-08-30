@@ -1,0 +1,10 @@
+# Analysis layer. The Rust side has no dependency beyond cargo.
+#
+# Lower bounds rather than pins: nothing here uses a recent API, and pinning
+# exact versions in a research repo tends to break a clone a year later for no
+# benefit. Versions the results were produced with are recorded below.
+
+numpy>=1.24        # produced with 2.4.6
+pandas>=2.0        # produced with 3.0.5
+matplotlib>=3.7    # produced with 3.11.1, figures only
+pytest>=7.0        # produced with 9.0.3, tests only

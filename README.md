@@ -414,7 +414,9 @@ data/            gitignored; fetched, never committed
 
 ```sh
 cargo build --release
-cargo test --release          # 45 tests
+cargo test --release          # 46 tests
+pip install -r requirements.txt
+python3 -m pytest py/ -q      # 44 tests
 
 ./scripts/fetch.sh list                 # what Nasdaq publishes
 ./scripts/fetch.sh bx 20190730          # 391 MB, good for development

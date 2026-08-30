@@ -152,8 +152,9 @@ def validate(df, path):
 
         # A replace is a cancel plus a resubmission, so its net effect is the
         # new leg (if it rests at the touch) minus the old leg (if it was
-        # resting there). This decomposition is what caught the earlier
-        # version of this exporter labelling replaces as plain adds.
+        # resting there). Checking the decomposition is what distinguishes a
+        # replace from a plain add, whose net effect would be the new leg
+        # alone.
         #
         # Restricted to replaces that left the touch price unchanged: when the
         # withdrawn leg was the only order there, removing it moves the touch

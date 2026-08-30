@@ -15,8 +15,9 @@
 //! # Correctness
 //!
 //! A book that is subtly wrong yields features that are subtly wrong and a
-//! result that is confidently false, so the invariants in [`Book::check`] are
-//! run over full days rather than trusted.
+//! result that is confidently false, so [`Book::is_crossed`] and
+//! [`Book::depth_matches_orders`] are run over full sessions rather than
+//! trusted.
 
 pub mod book_set;
 
@@ -198,13 +199,6 @@ impl Book {
             self.best_bid().map_or(0, |(_, l)| l.shares),
             self.best_ask().map_or(0, |(_, l)| l.shares),
         )
-    }
-
-    /// Aggregate shares over the best `n` levels of each side.
-    pub fn depth_n(&self, n: usize) -> (u64, u64) {
-        let b = self.bids.values().rev().take(n).map(|l| l.shares).sum();
-        let a = self.asks.values().take(n).map(|l| l.shares).sum();
-        (b, a)
     }
 
     pub fn live_orders(&self) -> usize {
@@ -518,7 +512,6 @@ mod tests {
         assert_eq!(b.mid().unwrap(), 1000.5);
         assert_eq!(b.spread().unwrap(), 1);
         assert_eq!(b.touch_depth(), (100, 300));
-        assert_eq!(b.depth_n(2), (300, 300));
         assert!(b.depth_matches_orders());
     }
 

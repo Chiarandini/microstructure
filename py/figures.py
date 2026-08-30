@@ -27,7 +27,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from matplotlib.lines import Line2D
-from matplotlib.patches import FancyBboxPatch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import queue_reactive as QR
@@ -194,17 +193,6 @@ def fig_decay(theme):
 
 
 # --- 2. predicted move vs cost -------------------------------------------
-
-
-def rounded_barh(ax, y, width, height, color, rounding=0.16):
-    """Horizontal bar with a rounded data-end, square at the baseline."""
-    ax.add_patch(
-        FancyBboxPatch(
-            (0, y - height / 2), max(width, 1e-9), height,
-            boxstyle=f"round,pad=0,rounding_size={rounding * height}",
-            facecolor=color, edgecolor="none", mutation_aspect=0.02, zorder=3,
-        )
-    )
 
 
 def fig_cost(theme):
