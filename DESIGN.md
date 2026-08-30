@@ -176,6 +176,41 @@ the millions, not the hundreds of millions, so CSV costs disk and some read
 time but no dependency and no schema tooling. Revisit if the study grows to
 many symbols across all seven days at once.
 
+## Universe
+
+Fixed on 2026-08-30, before any predictive result had been computed. The
+point of writing it down here is that the symbol set cannot later be trimmed
+to whichever names happened to work.
+
+Selection is on one ex-ante axis: **tick-size regime**, which is the dominant
+structural distinction in microstructure. A large-tick stock trades at a price
+low enough that the one-cent tick is economically large, so the spread sits
+pinned at a single tick and the interesting dynamics are in the queue. A
+small-tick stock has a spread free to float over many ticks, so the dynamics
+are in price levels. Order flow imbalance is known to behave differently
+across the two, and a study drawn from one stratum cannot tell you which
+regime it found.
+
+| Symbol | Regime | Approx. price, 2019-07-30 | Why |
+|---|---|---|---|
+| INTC | large tick | $52 | Spread pinned at one tick; queue-dominated |
+| CSCO | large tick | $56 | Second large-tick name, different sector exposure |
+| AAPL | small tick | $208 | Canonical liquid small-tick equity |
+| MSFT | small tick | $140 | Borderline regime; useful as an intermediate case |
+| AMZN | very small tick | $1,900 | Spread spans many ticks; thin displayed queues |
+| GOOGL | very small tick | $1,250 | Second very-high-price name |
+| SPY | ETF | $300 | Index product; different participant mix from equities |
+| QQQ | ETF | $193 | Second ETF, Nasdaq-concentrated |
+
+Eight symbols across seven days is 56 symbol-days. Every one of them counts
+against the hypothesis budget in `py/experiments.jsonl`, whether or not it
+appears in the final writeup.
+
+Two properties this buys beyond breadth. Both ETFs and their large
+constituents are present, which is the pairing a cross-impact study would
+need. And 2020-01-30 sits shortly before the February 2020 volatility
+repricing, so the panel is not drawn entirely from one regime.
+
 ## The research question
 
 > Over the next `k` events, does order flow imbalance predict the change in

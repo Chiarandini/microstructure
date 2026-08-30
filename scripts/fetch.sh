@@ -85,7 +85,11 @@ fi
 echo "fetching $url"
 # --continue-at lets an interrupted multi-GB download resume rather than
 # restart, which matters on a laptop.
-curl -fSL --retry 3 --continue-at - -o "$out" "$url"
+# Progress meter only when attached to a terminal; in a log it emits a
+# few hundred KB of carriage-returned noise per file.
+progress=""
+[ -t 1 ] || progress="--no-progress-meter"
+curl -fSL --retry 3 --continue-at - $progress -o "$out" "$url"
 echo "wrote $out"
 
 # A truncated file is worse than a missing one: it parses happily until it

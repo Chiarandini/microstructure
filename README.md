@@ -15,6 +15,7 @@ are in [`DESIGN.md`](DESIGN.md).
 | 1. ITCH 5.0 decoder | done |
 | 2. Book reconstruction, validated | done |
 | 3. Per-event export, validated | done |
+| 3b. Study panel built | done |
 | 4. OFI predictability study | next |
 | 5. Extension: cross-impact or a fitted queue-reactive model | not started |
 | 6. Writeup | not started |
@@ -176,3 +177,15 @@ and January 2020 for both Nasdaq and Nasdaq BX.
 Seven distinct days matters for the study. Out-of-sample will mean a
 different day, not a later slice of the same one; intraday autocorrelation
 and a shared regime make same-day holdout optimistic by construction.
+
+The panel is built:
+
+```sh
+./scripts/build_dataset.sh    # fetch, export and validate all seven sessions
+```
+
+Seven sessions across eight symbols, 86.1 M events, about 1.4 GB exported.
+Per-symbol-day row counts are in [`PANEL.md`](PANEL.md); replay is
+deterministic, so a correct rebuild reproduces them exactly. The universe and
+the reason each symbol is in it are in [`DESIGN.md`](DESIGN.md), fixed before
+any predictive result was computed.
