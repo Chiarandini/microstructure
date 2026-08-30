@@ -17,12 +17,13 @@ are in [`DESIGN.md`](DESIGN.md).
 | 3. Per-event export, validated | done |
 | 3b. Study panel built | done |
 | 3c. Feature construction, validated | done |
-| 4. OFI predictability study | next |
-| 5. Extension: cross-impact or a fitted queue-reactive model | not started |
-| 6. Writeup | not started |
+| 4. OFI predictability study | done |
+| 5. Extension: fitted queue-reactive / Hawkes model | next |
+| 6. Writeup | drafted below |
 
-Nothing below is a research finding yet. What follows is an engineering
-result: the book the study will rest on has been checked rather than assumed.
+The result is in **[Result](#result)** below. Everything before it is the
+engineering the result rests on: a reconstruction that was checked rather than
+assumed.
 
 ## Reconstruction result
 
@@ -201,6 +202,104 @@ cover. Effective spread falls below quoted only where the spread is wide
 enough to permit price improvement, queue sizes fall as price rises, and order
 flow is far more persistent in the small-tick names. A study drawn from one
 stratum could not have told you any of that.
+
+## Result
+
+> Over the next `k` events, does order flow imbalance predict the change in
+> mid-price, and does that predictability survive an honest accounting of
+> transaction costs and multiple testing?
+
+**Yes, no, and the second answer is the more robust one.** OFI predicts
+short-horizon mid-price changes with a statistically solid but economically
+negligible effect: at every bucket size, symbol and horizon examined, the
+predicted move is smaller than the spread required to capture it.
+
+The protocol was fixed in [`DESIGN.md`](DESIGN.md) before any coefficient was
+computed, and feature construction was settled and unit-tested before the
+first regression ran.
+
+### The reproduction works
+
+Contemporaneous price *impact* runs first, as a control. It is not a
+prediction and cannot be traded, but it is a known result, so failing it would
+mean the pipeline was broken and any subsequent null would be a bug rather
+than a finding.
+
+| | QQQ | SPY | CSCO | AAPL | MSFT | INTC | AMZN | GOOGL |
+|---|---|---|---|---|---|---|---|---|
+| R² | 0.63 | 0.53 | 0.52 | 0.50 | 0.49 | 0.49 | 0.37 | 0.17 |
+
+Cont, Kukanov and Stoikov report roughly 0.65 on their sample. Six of eight
+symbols land between 0.49 and 0.63. The two low outliers are exactly the two
+very-small-tick names, where spreads span 35 to 41 ticks and the linear
+depth-to-price relationship is the weakest description of the book.
+
+### The prediction is real and tiny
+
+Strictly forward windows, trained on the first four sessions and tested on the
+last three, chronologically. Median out-of-sample R² across the eight symbols:
+
+| horizon (buckets) | k=50 | k=200 | k=1000 |
+|---|---|---|---|
+| 1 | 0.0120 | 0.0041 | 0.0004 |
+| 2 | 0.0102 | 0.0027 | 0.0001 |
+| 3 | 0.0090 | 0.0018 | 0.0003 |
+| 5 | 0.0075 | 0.0010 | 0.0001 |
+| 10 | 0.0041 | 0.0006 | 0.0000 |
+| 20 | 0.0020 | 0.0004 | -0.0002 |
+| CIs excluding zero | 48/48 | 37/48 | 6/48 |
+
+The decay is monotone in horizon at every bucket size, which is the shape the
+effect should have if OFI carries information that the price absorbs quickly.
+
+It is also strongly scale-dependent, and that is worth stating plainly rather
+than burying: **the statistical significance is not robust to bucket size.** At
+50 events per bucket every interval excludes zero; at 1000 events almost none
+do. A study that had only run k=50 would have reported a much stronger result
+than one that had only run k=1000, and neither would have been wrong about its
+own specification. Reporting all three is the only honest option, and all 144
+specifications are logged in `py/experiments.jsonl`.
+
+### It is not tradeable
+
+Comparing the predicted move at the 90th percentile of |OFI| against half the
+median quoted spread, which is the minimum cost of crossing:
+
+| | SPY | QQQ | GOOGL | MSFT | AMZN | CSCO | AAPL | INTC |
+|---|---|---|---|---|---|---|---|---|
+| predicted / half-spread | 0.19 | 0.16 | 0.13 | 0.13 | 0.12 | 0.10 | 0.10 | 0.09 |
+
+**Zero of 144 specifications produce a predicted move exceeding half the
+spread.** The best case, SPY, reaches 19% of the cost of crossing. Under
+Benjamini-Hochberg at 5%, 45 of 48 predictive hypotheses survive at k=200, so
+this is not a failure to detect the signal. The signal is there, it is
+detectable, and it is roughly an order of magnitude too small to pay for the
+spread.
+
+That gap between statistical and economic significance is the actual finding,
+and it is the reason the cost comparison was written into the protocol before
+any result existed rather than added afterwards.
+
+### Limits
+
+- **Single venue.** This is Nasdaq-book OFI predicting the Nasdaq mid, not a
+  consolidated NBBO. A consolidated book from public data is its own project.
+- **No queue position.** Two orders at the same price are interchangeable
+  here, so nothing captures the value of being early in a queue.
+- **Half the quoted spread is a floor on cost, not an estimate of it.** A real
+  execution also faces queue risk, adverse selection, and fees. The true
+  threshold is higher than the one used, which only strengthens the negative
+  conclusion.
+- **Seven sessions.** They span a year and include one day shortly before the
+  February 2020 repricing, but each is a single day, and the test set is three.
+- **Linear and univariate.** A single regressor with no interactions. The
+  queue-reactive and Hawkes extensions in `DESIGN.md` are where a
+  non-linear, state-dependent treatment belongs.
+
+```sh
+python3 py/build_buckets.py 200
+python3 py/study_ofi.py --k 200
+```
 
 ## Failing loudly
 
