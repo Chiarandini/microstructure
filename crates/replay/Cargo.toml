@@ -1,0 +1,9 @@
+[package]
+name = "replay"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+itch = { path = "../itch" }
+lob = { path = "../lob" }
+clap = { version = "4", features = ["derive"] }

@@ -1,0 +1,11 @@
+/target
+target/
+
+# ITCH sessions are 0.4 to 5.6 GB each and openly redownloadable via
+# scripts/fetch.sh. Nothing here belongs in git.
+/data/
+
+.DS_Store
+__pycache__/
+*.pyc
+.venv/

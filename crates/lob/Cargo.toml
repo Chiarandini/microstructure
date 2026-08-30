@@ -1,0 +1,7 @@
+[package]
+name = "lob"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+itch = { path = "../itch" }
