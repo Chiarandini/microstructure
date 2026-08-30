@@ -203,6 +203,11 @@ enough to permit price improvement, queue sizes fall as price rises, and order
 flow is far more persistent in the small-tick names. A study drawn from one
 stratum could not have told you any of that.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="figures/tick-regimes-dark.png">
+  <img alt="Order flow autocorrelation against median quoted spread in ticks, one point per symbol. The five one-tick symbols cluster near zero autocorrelation; AMZN and GOOGL, at 35 and 41 ticks, sit near 0.3 and 0.37." src="figures/tick-regimes-light.png">
+</picture>
+
 ## Result
 
 > Over the next `k` events, does order flow imbalance predict the change in
@@ -236,6 +241,11 @@ depth-to-price relationship is the weakest description of the book.
 
 ### The prediction is real and tiny
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="figures/ofi-decay-dark.png">
+  <img alt="Median out-of-sample R-squared against forward horizon, for three event-clock bucket sizes. All three decay monotonically; k=50 starts near 0.012, k=200 near 0.004, k=1000 flat near zero." src="figures/ofi-decay-light.png">
+</picture>
+
 Strictly forward windows, trained on the first four sessions and tested on the
 last three, chronologically. Median out-of-sample R² across the eight symbols:
 
@@ -261,6 +271,11 @@ own specification. Reporting all three is the only honest option, and all 144
 specifications are logged in `py/experiments.jsonl`.
 
 ### It is not tradeable
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="figures/ofi-vs-cost-dark.png">
+  <img alt="Predicted move divided by half the quoted spread, per symbol. Every bar falls between 0.09 and 0.19, far short of the 1.0 line marking the cost of crossing the spread." src="figures/ofi-vs-cost-light.png">
+</picture>
 
 Comparing the predicted move at the 90th percentile of |OFI| against half the
 median quoted spread, which is the minimum cost of crossing:
@@ -316,26 +331,29 @@ pseudo-event, because a raw `N/T` assigns exactly zero to any state where a
 channel happened not to fire, which asserts impossibility and makes held-out
 likelihood negatively infinite.
 
-AAPL bid, training sessions, intensities in events per second:
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="figures/queue-intensities-dark.png">
+  <img alt="Small multiples for eight symbols, log-log, of fitted departure intensity against queue size. Cancellation intensity rises with queue size in every panel while limit arrival stays close to flat." src="figures/queue-intensities-light.png">
+</picture>
 
-| queue (shares) | time (s) | λ_L | λ_C | λ_M | λ_P |
-|---|---|---|---|---|---|
-| 3-5 | 422 | 3.11 | 0.04 | 0.22 | 4.06 |
-| 41-62 | 2,862 | 2.94 | 0.91 | 0.47 | 2.95 |
-| 94-141 | 19,933 | 5.61 | 1.46 | 0.81 | 3.98 |
-| 214-323 | 14,975 | 3.73 | 3.78 | 0.82 | 1.20 |
-| 488-737 | 10,249 | 3.90 | 6.64 | 0.74 | 3.26 |
-| 1113-1682 | 1,149 | 5.70 | 8.08 | 1.40 | 3.50 |
+Measured as elasticities over the middle 95% of occupancy, `d log λ / d log q`:
 
-**Cancellation intensity rises by more than two orders of magnitude across the
-range while limit arrival stays roughly flat.** That is the Huang-Lehalle-
-Rosenbaum finding, reproduced. It is also the mechanism that makes a deep queue
-mean-revert rather than drift: depth attracts cancellation, not more depth.
+| | INTC | CSCO | QQQ | SPY | AAPL | MSFT | AMZN | GOOGL | median |
+|---|---|---|---|---|---|---|---|---|---|
+| cancellations | +0.27 | +0.32 | +0.32 | +0.70 | +0.88 | +0.92 | +1.00 | +1.14 | **+0.79** |
+| limit arrivals | +0.13 | +0.06 | −0.23 | +0.26 | +0.00 | +0.32 | +0.11 | +0.10 | **+0.11** |
 
-The per-share cancellation hazard is not constant either. At 100 shares it is
-about 0.0146/s, at 250 shares 0.0151/s, but by 1,400 shares only 0.0058/s. An
-order sitting in a large queue is roughly three times *less* likely to be
-pulled per share than one in a small queue.
+**Cancellation intensity rises with queue size in all eight symbols; limit
+arrival is near flat.** That is the Huang-Lehalle-Rosenbaum finding, reproduced,
+and it is the mechanism that makes a deep queue mean-revert rather than drift:
+depth attracts cancellation, not more depth.
+
+An elasticity of exactly 1 would mean a constant per-share cancellation hazard,
+each resting order equally likely to be pulled regardless of how many others
+sit beside it. The median of +0.79 says larger queues are cancelled somewhat
+*less* aggressively per share, and the two large-tick names, at +0.27 and
++0.32, markedly so. Being early in a long queue at a one-cent-spread stock is a
+more durable position than the raw depth suggests.
 
 ### Does the state dependence earn its parameters?
 
@@ -366,6 +384,7 @@ even while being decisively rejected on likelihood.
 ```sh
 python3 py/build_queue_states.py
 python3 py/study_queue_reactive.py
+python3 py/figures.py          # regenerates every figure, light and dark
 ```
 
 ## Failing loudly
