@@ -16,6 +16,7 @@ are in [`DESIGN.md`](DESIGN.md).
 | 2. Book reconstruction, validated | done |
 | 3. Per-event export, validated | done |
 | 3b. Study panel built | done |
+| 3c. Feature construction, validated | done |
 | 4. OFI predictability study | next |
 | 5. Extension: cross-impact or a fitted queue-reactive model | not started |
 | 6. Writeup | not started |
@@ -159,6 +160,47 @@ than a standing one.
 ```sh
 python3 py/cross_venue_check.py AAPL MSFT INTC
 ```
+
+## Features
+
+`py/features.py` builds order flow imbalance (Cont-Kukanov-Stoikov), queue
+imbalance, aggressor sign, signed volume and effective spread from the event
+log. `py/feature_spike.py` validates them **without computing any forward
+return**, which is the point: once you have seen how a feature predicts, every
+later choice about that feature is made by someone who has already looked. The
+regression belongs in phase 4, on a construction that is already settled.
+
+So the checks are internal properties: that OFI reduces exactly to the change
+in depth when the touch does not move, that an add at the bid contributes
+`+shares` and one at the ask `-shares`, that queue imbalance stays in
+`[-1, 1]`, and that the effective spread is non-negative, which is the
+arithmetic signature of a correct aggressor sign. 86.1 M rows across the 56
+files, zero failures.
+
+Per-event OFI is computed from a single row's own before-to-after transition
+rather than by comparing consecutive rows. The two are identical, because each
+row's `before` is the previous row's `after`, and that chaining is itself
+checked.
+
+The pre-registered tick-size stratification is visible in the features, on
+2019-07-30:
+
+| | price | spread | ticks | effective | OFI sd | bucketed OFI ac(1) |
+|---|---|---|---|---|---|---|
+| INTC | $51.98 | 1.0c | 1 | 1.0c | 231 | +0.012 |
+| CSCO | $56.69 | 1.0c | 1 | 1.0c | 238 | +0.048 |
+| MSFT | $140.62 | 1.0c | 1 | 1.0c | 99 | +0.093 |
+| AAPL | $208.25 | 1.0c | 1 | 1.0c | 88 | +0.102 |
+| SPY | $300.55 | 1.0c | 1 | 1.0c | 347 | +0.129 |
+| QQQ | $193.78 | 1.0c | 1 | 1.0c | 353 | +0.141 |
+| AMZN | $1897.94 | 35.0c | 35 | 24.0c | 32 | +0.295 |
+| GOOGL | $1230.79 | 41.0c | 41 | 26.0c | 21 | +0.412 |
+
+Spread in ticks spans 1 to 41, which is the range the universe was chosen to
+cover. Effective spread falls below quoted only where the spread is wide
+enough to permit price improvement, queue sizes fall as price rises, and order
+flow is far more persistent in the small-tick names. A study drawn from one
+stratum could not have told you any of that.
 
 ## Failing loudly
 

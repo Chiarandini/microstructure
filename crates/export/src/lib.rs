@@ -27,6 +27,7 @@ use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 pub const HEADER: &str = "ts_ns,event,side,price,shares,old_price,old_shares,\
+printable,resting_price,\
 bid_px_before,ask_px_before,bid_sz_before,ask_sz_before,\
 bid_px_after,ask_px_after,bid_sz_after,ask_sz_after\n";
 
@@ -91,6 +92,26 @@ fn event_old_leg(event: &Event) -> Option<(u32, u32)> {
             old_shares,
             ..
         } => Some((old_price, old_shares)),
+        _ => None,
+    }
+}
+
+/// Execution detail: whether the print reached the tape, and the price the
+/// consumed order was resting at. Empty for every non-trade event.
+///
+/// Both are needed downstream and neither is recoverable from the rest of the
+/// row. A non-printable execution removes displayed depth without being a
+/// tape print, so counting it as a trade overstates volume. And when the
+/// execution price differs from the resting price, the resting side stops
+/// identifying the aggressor, so a signing rule that assumes it does will
+/// mislabel exactly those trades.
+fn event_execution(event: &Event) -> Option<(bool, u32)> {
+    match *event {
+        Event::Trade {
+            printable,
+            resting_price,
+            ..
+        } => Some((printable, resting_price)),
         _ => None,
     }
 }
@@ -179,6 +200,11 @@ impl EventWriter {
         let _ = write!(row, "{ts_ns},{label},{side},{price},{shares},");
         if let Some((old_price, old_shares)) = event_old_leg(event) {
             let _ = write!(row, "{old_price},{old_shares},");
+        } else {
+            row.push_str(",,");
+        }
+        if let Some((printable, resting_price)) = event_execution(event) {
+            let _ = write!(row, "{},{resting_price},", u8::from(printable));
         } else {
             row.push_str(",,");
         }
@@ -422,6 +448,46 @@ mod tests {
         );
         assert!(lines[2].starts_with("2,trade,S,2000,200,"));
         assert!(lines[3].starts_with("3,cancel,S,2000,100,"));
+        assert_eq!(field(&lines, 2, "printable"), "1");
+        assert_eq!(field(&lines, 2, "resting_price"), "2000");
+        assert_eq!(
+            field(&lines, 3, "printable"),
+            "",
+            "cancels are not executions"
+        );
+    }
+
+    /// An execute-with-price prints away from the resting price and may not
+    /// reach the tape. Both facts have to survive to the file: neither is
+    /// recoverable from the other columns.
+    #[test]
+    fn execute_with_price_records_printability_and_resting_price() {
+        let dir = std::env::temp_dir().join("export_test_exec_price");
+        let _ = fs::remove_dir_all(&dir);
+        let lines = run(
+            &dir,
+            &[
+                (1, add(1, Side::Sell, 500, 2000)),
+                (
+                    2,
+                    Body::OrderExecutedWithPrice {
+                        order_ref: 1,
+                        executed_shares: 200,
+                        match_number: 9,
+                        printable: false,
+                        execution_price: 1950,
+                    },
+                ),
+            ],
+        );
+        assert_eq!(field(&lines, 2, "event"), "trade");
+        assert_eq!(field(&lines, 2, "price"), "1950", "the print price");
+        assert_eq!(
+            field(&lines, 2, "resting_price"),
+            "2000",
+            "where depth left"
+        );
+        assert_eq!(field(&lines, 2, "printable"), "0");
     }
 
     /// Hidden trades carry no displayed side and must not perturb the book,

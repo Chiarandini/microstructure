@@ -212,6 +212,46 @@ def validate(df, path):
         not bool(df.loc[non_replace, "old_price"].notna().any()),
     )
 
+    # Execution detail belongs to trades and nothing else, and both columns
+    # must appear together: a printable flag without a resting price would
+    # leave the aggressor unidentifiable.
+    trades = df.event == "trade"
+    c.check(
+        "only trades carry execution detail",
+        not bool(
+            df.loc[~trades, "printable"].notna().any()
+            or df.loc[~trades, "resting_price"].notna().any()
+        ),
+    )
+    if trades.any():
+        t = df[trades]
+        c.check(
+            "trades carry execution detail",
+            bool(t.printable.notna().all() and t.resting_price.notna().all()),
+        )
+        c.check("printable is 0 or 1", bool(t.printable.isin([0, 1]).all()))
+
+        # Depth leaves at the resting price, so that price must be a real
+        # level: at or inside the prevailing quote on the side that was
+        # consumed. This is what makes the resting price usable, rather than
+        # merely present.
+        rest_ok = (
+            ((t.side == "B") & (t.resting_price <= t.bid_px_before))
+            | ((t.side == "S") & (t.resting_price >= t.ask_px_before))
+            | t.bid_px_before.isna()
+            | t.ask_px_before.isna()
+        )
+        c.check(
+            "resting price sits on its own side of the book",
+            bool(rest_ok.all()),
+            f"{int((~rest_ok).sum()):,} of {int(trades.sum()):,} off-side",
+        )
+
+        away = t.price != t.resting_price
+        print(f"    ({int(away.sum()):,} of {int(trades.sum()):,} executions "
+              f"printed away from the resting price; "
+              f"{int((t.printable == 0).sum()):,} non-printable)")
+
     # Hidden trades are reported by the venue but were never displayed, so
     # they must leave the visible book untouched.
     hidden = df.event == "hidden"

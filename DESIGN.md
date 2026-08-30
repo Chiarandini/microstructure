@@ -159,6 +159,7 @@ Row schema, one per event:
 ```
 ts_ns, event, side, price, shares,
 old_price, old_shares,                            withdrawn leg of a replace
+printable, resting_price,                         execution detail
 bid_px_before, ask_px_before, bid_sz_before, ask_sz_before,
 bid_px_after,  ask_px_after,  bid_sz_after,  ask_sz_after
 ```
@@ -167,6 +168,15 @@ A replace is labelled `replace`, not `add`. It is a cancellation plus a
 resubmission that loses queue priority, so where both legs rest at the same
 price its net depth effect is `new - old`. The withdrawn leg is carried so a
 consumer can decompose it without replaying the book.
+
+Executions carry two extra facts, neither recoverable from the rest of the
+row. `printable` is false for executions that remove displayed depth without
+reaching the tape, which must not be counted as volume. `resting_price` is
+where the consumed order was sitting, which differs from the print price for
+an `OrderExecutedWithPrice`. That difference matters because the resting side
+is what identifies the aggressor: an execution against a resting bid means
+someone sold into it. When a print lands away from the order's own quote that
+inference fails, and about 1.3% of AAPL executions are in that case.
 
 Carrying both sides of the event is what makes order flow imbalance
 computable without replaying the book in Python, and what gives the

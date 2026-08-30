@@ -66,10 +66,21 @@ pub enum Event {
     /// Displayed depth was consumed by an execution.
     Trade {
         side: Side,
+        /// The price the execution printed at.
         price: Price,
         shares: u32,
-        /// False for the non-printable leg of an execute-with-price.
+        /// False for the non-printable leg of an execute-with-price. Such an
+        /// execution removes displayed depth but is not a tape print, so it
+        /// must not be counted in trade-based features.
         printable: bool,
+        /// The price the consumed order was resting at, which is where depth
+        /// actually left the book.
+        ///
+        /// Equal to `price` for an ordinary execution. They differ for an
+        /// execute-with-price, and the difference matters: the resting side
+        /// no longer identifies the aggressor when an order prints away from
+        /// its own quote, so any signing rule has to know which case it is in.
+        resting_price: Price,
     },
     /// A trade against non-displayed liquidity. Reported by the venue but not
     /// a change to the visible book.
@@ -312,6 +323,7 @@ impl Book {
                     price: order.price,
                     shares: taken,
                     printable: true,
+                    resting_price: order.price,
                 })
             }
 
@@ -332,6 +344,7 @@ impl Book {
                     price: execution_price,
                     shares: taken,
                     printable,
+                    resting_price: order.price,
                 })
             }
 
@@ -566,7 +579,8 @@ mod tests {
                 side: Side::Sell,
                 price: 2000,
                 shares: 200,
-                printable: true
+                printable: true,
+                resting_price: 2000,
             })
         );
         assert_eq!(b.best_ask().unwrap().1.shares, 300);
@@ -592,7 +606,10 @@ mod tests {
                 side: Side::Sell,
                 price: 1950,
                 shares: 200,
-                printable: false
+                printable: false,
+                // Depth left the book at 2000, where the order rested, even
+                // though the execution printed at 1950.
+                resting_price: 2000,
             })
         );
         assert_eq!(b.best_ask().unwrap().0, 2000);
