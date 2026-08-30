@@ -24,40 +24,43 @@ result: the book the study will rest on has been checked rather than assumed.
 
 ## Reconstruction result
 
-Full Nasdaq BX session, 2019-07-30, all 8,849 symbols reconstructed
-simultaneously.
+Full Nasdaq session, 2019-07-30, all 8,849 symbols reconstructed
+simultaneously. The BX session for the same date is shown alongside it.
 
 ```
-messages                 28,734,686
-  add                    10,629,593
-  executed                  681,693
-  cancel                      299,199
-  delete                 10,164,658
-  replace                 2,046,443
-  hidden trade              243,778
+                          Nasdaq          BX
+messages             282,229,684   28,734,686
+  add                125,460,750   10,629,593
+  executed             7,717,995      681,693
+  cancel               2,358,032      299,199
+  delete             119,999,061   10,164,658
+  replace             21,253,951    2,046,443
+  hidden trade         1,461,010      243,778
+  cross                   17,700            0
 
-elapsed                        4.82 s   (5.96 M msg/s)
+elapsed                  70.14 s       4.82 s
+throughput          4.02 M msg/s  5.96 M msg/s
 
-crossed-book checks      12,435,862
-crossed-book fails                0
-unknown order refs                0
-oversized removals                0
-orders still live                 0
-depth vs order map       consistent
+crossed-book checks  141,170,621   12,435,862
+crossed-book fails             0            0
+unknown order refs             0            0
+oversized removals             0            0
+orders still live              0            0
+depth vs order map    consistent   consistent
 ```
 
 The four zeros are the point.
 
-- **No crossed books.** Across 12.4 million checks during the continuous
+- **No crossed books.** Across 141 million checks during the continuous
   session, best bid never met or crossed best ask. Checked only between 09:30
   and 16:00, because a crossed book while halted or accumulating auction
   interest is legitimate and flagging it would be a false positive.
-- **No unknown order references.** Every execution, cancel, delete, and
-  replace referred to an order the book already knew about. A non-zero count
-  here means messages are being dropped or misrouted.
+- **No unknown order references.** Every one of the 151 million executions,
+  cancels, deletes, and replaces referred to an order the book already knew
+  about. A non-zero count here means messages are being dropped or misrouted.
 - **No oversized removals.** No message ever tried to take more shares off an
   order than it held.
-- **No orders left live at end of day.** Every one of the 10.6 million orders
+- **No orders left live at end of day.** Every one of the 125.5 million orders
   opened during the session was accounted for and removed. This is the
   strongest of the four: it is a conservation law over the whole day, and
   almost any bookkeeping error would break it.
@@ -77,10 +80,10 @@ Two reconstruction traps that these checks exist to catch, both handled:
 
 ## Throughput
 
-5.96 M messages/second, single-threaded, including gzip decompression and
-maintaining 8,849 live books. A full BX day replays in under five seconds,
-which is the property that matters: re-running the entire study after a bug
-fix is a coffee-free operation rather than an overnight job.
+4 M messages/second single-threaded on the full Nasdaq feed, including gzip
+decompression and maintaining 8,849 live books. A whole trading day replays in
+70 seconds, which is the property that matters: re-running the entire study
+after a bug fix is a coffee-length operation rather than an overnight job.
 
 The decoder borrows from the read buffer and allocates nothing per message.
 Prices stay as integer ticks of $0.0001 end to end; converting to floating
