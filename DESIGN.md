@@ -19,8 +19,7 @@ Two halves, deliberately split by language.
   gzipped and on the order of 300 million messages. Book reconstruction is a
   sequential state machine over that stream: it cannot be vectorised away and
   it has to be fast enough that re-running the whole study after a bug fix is
-  cheap rather than an overnight job. This is the same class of problem as
-  `collatz-chains` and it reuses the same instincts.
+  cheap rather than an overnight job.
 - **Python for the statistics.** Regression, cross-validation, bootstrap, and
   plotting belong where the ecosystem is. The Rust side's job is to emit a
   clean tabular artifact; the Python side never parses a binary protocol.
@@ -54,22 +53,16 @@ cannot fetch themselves, and the fetch is scripted.
 
 ## Architecture
 
-Built:
-
 ```
 crates/itch      ITCH 5.0 decoder: bytes -> typed messages, no allocation
                  per message; streaming reader over gzipped BinaryFILE
 crates/lob       order book state machine, plus BookSet, which routes a
                  whole session into per-symbol books
+crates/export    book + event stream -> per-event rows on disk
 crates/replay    the binary: drives a session, verifies invariants, reports
-scripts/fetch.sh session download
-```
-
-Planned, and not yet written:
-
-```
-crates/export    book + event stream -> per-event rows on disk (phase 3)
-py/              analysis: regressions, evaluation protocol, figures (phase 4)
+scripts/         session download, and the panel build
+py/              analysis: features, regressions, the point-process fit,
+                 the validators and the figures
 ```
 
 ### `itch`
@@ -142,7 +135,7 @@ currently pull.
 There is no CI. The checks run when `replay`, `py/validate_export.py` or
 `py/cross_venue_check.py` are run.
 
-### `export` (planned, phase 3)
+### `export`
 
 **Rust emits a per-event log; Python computes every feature.** The Rust side
 writes one row per book event, carrying the pre-event and post-event top of
@@ -182,12 +175,12 @@ Carrying both sides of the event is what makes order flow imbalance
 computable without replaying the book in Python, and what gives the
 queue-reactive fit its (queue state -> transition) pairs directly.
 
-Retaining nanosecond timestamps and event types unaggregated is what the
-phase-5 model needs: a Hawkes fit is estimation on event times, and
+Retaining nanosecond timestamps and event types unaggregated is what a
+point-process fit needs: a Hawkes fit is estimation on event times, and
 discretising them at export would destroy the object being estimated.
 
-Features to be computed downstream, all functions of information strictly
-before the timestamp they are stamped with:
+Features computed downstream, all functions of information strictly before
+the timestamp they are stamped with:
 
 - **Order flow imbalance (OFI)**, in the Cont-Kukanov-Stoikov sense: the
   signed change in depth at the best quotes, which is the quantity that maps
@@ -288,13 +281,16 @@ the extensions below are where the actual research sits.
 
 | Phase | Deliverable | Done when |
 |---|---|---|
-| 0 | Data fetch script, project skeleton | `just fetch` retrieves a day and verifies its checksum |
+| 0 | Data fetch script, project skeleton | `scripts/fetch.sh` retrieves a day and verifies its size, and its checksum where one is published |
 | 1 | `itch` decoder | Round-trips every message type; parses a full day without error |
 | 2 | `lob` reconstruction | All three invariants hold across a full day |
-| 3 | `features` + Parquet export | One file per symbol-day, look-ahead test passes |
+| 3 | `export` + downstream features | One file per symbol-day, look-ahead test passes |
 | 4 | OFI reproduction | Decay curve, out-of-sample by day, with bootstrap error bars |
 | 5 | Extension 1 or 2 | A result that is not just a reproduction |
 | 6 | Writeup | README carries the finding, its error bars, and its limits |
+
+Phase 5 took extension 2, in its queue-reactive form. Cross-impact and regime
+dependence are not built.
 
 ## Non-goals
 
